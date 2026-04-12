@@ -102,6 +102,7 @@ def startup() -> None:
 class RunRequest(BaseModel):
     ticker: str | None = Field(default=None, min_length=1, max_length=10, description="Optional manual ticker override")
     confirm_execution: bool = False
+    auto_execute: bool = False
 
 
 class HealthResponse(BaseModel):
@@ -303,6 +304,7 @@ async def run_workflow(
 ) -> dict:
     ticker = payload.ticker.strip().upper() if payload.ticker else None
     confirm_execution = bool(payload.confirm_execution)
+    auto_execute = bool(payload.auto_execute)
     if confirm_execution:
         if current_user is None:
             raise HTTPException(
@@ -317,7 +319,17 @@ async def run_workflow(
                     "Run analysis first, then approve the pending execution from the workspace."
                 ),
             )
+    if auto_execute and not confirm_execution and current_user is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Sign in is required before auto execution can be enabled.",
+        )
     connection = get_broker_connection(db, current_user.id, "alpaca") if current_user else None
+    if auto_execute and not confirm_execution and connection is None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Connect an execution-capable provider before enabling auto execution.",
+        )
     excluded_tickers = recent_unique_tickers(db, current_user, limit=3) if current_user and not ticker and not confirm_execution else []
     broker_connection = None
     broker_connection_summary = None
@@ -346,7 +358,7 @@ async def run_workflow(
             broker_connection,
             broker_connection_summary,
             excluded_tickers,
-            confirm_execution and broker_connection is not None,
+            (confirm_execution or auto_execute) and broker_connection is not None,
         )
     except Exception as exc:
         logger.exception("Workflow execution failed")
@@ -362,6 +374,7 @@ async def run_workflow(
     result["broker_connection_error"] = broker_connection_error
     result["excluded_tickers"] = excluded_tickers
     result["execution_confirmation_armed"] = confirm_execution and broker_connection is not None
+    result["auto_execute_enabled"] = auto_execute and broker_connection is not None
     if current_user:
         run_record = create_workflow_run(db, current_user, result)
         result["history_id"] = run_record.id

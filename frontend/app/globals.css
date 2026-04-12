@@ -750,6 +750,95 @@ textarea {
   font-weight: 400;
 }
 
+.execution-toggle-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 12px 0 10px;
+  padding: 12px 13px;
+  border-radius: 12px;
+  border: 1px solid rgba(113, 129, 160, 0.2);
+  background: rgba(19, 23, 31, 0.72);
+}
+
+.execution-toggle-row span {
+  display: grid;
+  gap: 3px;
+}
+
+.execution-toggle-row strong {
+  font-size: var(--type-body);
+  font-weight: 600;
+  color: #eef3fb;
+}
+
+.execution-toggle-row small {
+  color: var(--muted);
+  font-size: var(--type-footnote);
+  line-height: 1.4;
+}
+
+.execution-toggle-row input {
+  width: 42px;
+  height: 22px;
+  accent-color: #5fa7ff;
+  cursor: pointer;
+  flex: 0 0 auto;
+}
+
+.execution-toggle-row.is-disabled {
+  opacity: 0.7;
+}
+
+.execution-toggle-row.is-disabled input {
+  cursor: not-allowed;
+}
+
+.execution-repeat-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 0 0 10px;
+  padding: 12px 13px;
+  border-radius: 12px;
+  border: 1px solid rgba(113, 129, 160, 0.2);
+  background: rgba(19, 23, 31, 0.56);
+}
+
+.execution-repeat-row span {
+  display: grid;
+  gap: 3px;
+}
+
+.execution-repeat-row strong {
+  font-size: var(--type-body);
+  font-weight: 600;
+  color: #eef3fb;
+}
+
+.execution-repeat-row small {
+  color: var(--muted);
+  font-size: var(--type-footnote);
+  line-height: 1.4;
+}
+
+.execution-repeat-row input {
+  width: 72px;
+  border: 1px solid rgba(113, 129, 160, 0.26);
+  background: linear-gradient(180deg, rgba(15, 19, 25, 0.96), rgba(12, 15, 20, 0.98));
+  color: var(--text);
+  border-radius: 10px;
+  padding: 9px 10px;
+  text-align: center;
+}
+
+.execution-auto-note {
+  margin-top: 10px;
+  color: #9ed3ff;
+}
+
 .execution-confirm-button {
   margin-top: 12px;
   width: 100%;
@@ -1575,6 +1664,18 @@ textarea {
   margin: 0;
   color: var(--muted);
   line-height: 1.6;
+}
+
+.help-list {
+  margin: 14px 0 0;
+  padding-left: 18px;
+  color: var(--muted);
+}
+
+.help-list li {
+  margin: 0 0 8px;
+  line-height: 1.55;
+  font-size: var(--type-body);
 }
 
 .raw-state {

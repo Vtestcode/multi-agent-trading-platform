@@ -6,6 +6,17 @@ import Link from "next/link";
 const DEFAULT_API_BASE_URL = "http://127.0.0.1:8000";
 const TOKEN_STORAGE_KEY = "trading_platform_access_token";
 const USER_STORAGE_KEY = "trading_platform_user";
+const AUTO_EXECUTE_STORAGE_KEY = "trading_platform_auto_execute";
+const AUTO_RUN_COUNT_STORAGE_KEY = "trading_platform_auto_run_count";
+
+function parseTickerBatch(rawValue) {
+  return [...new Set(
+    String(rawValue || "")
+      .split(/[\s,]+/)
+      .map((value) => value.trim().toUpperCase())
+      .filter((value) => /^[A-Z]{1,10}$/.test(value))
+  )];
+}
 
 function getApiBaseCandidates(primaryBaseUrl) {
   const normalized = (primaryBaseUrl || DEFAULT_API_BASE_URL).replace(/\/$/, "");
@@ -457,13 +468,10 @@ function GuestPanel(props) {
   return (
     <section className="sidebar-panel">
       <p className="section-kicker">Access</p>
-      <h3 className="guest-title">Sign in only when you want to execute.</h3>
+      <h3 className="guest-title">Sign in required to execute trades.</h3>
       <button type="button" className="secondary-button guest-cta" onClick={onOpenAuth}>
         Login To Trade
       </button>
-      <Link href="/help" className="help-inline-link">
-        View Help
-      </Link>
     </section>
   );
 }
@@ -584,6 +592,8 @@ export default function Page() {
   const [googleScriptReady, setGoogleScriptReady] = useState(false);
   const [showCommandPalette, setShowCommandPalette] = useState(false);
   const [runHistory, setRunHistory] = useState([]);
+  const [autoExecutionEnabled, setAutoExecutionEnabled] = useState(false);
+  const [autoRunCount, setAutoRunCount] = useState(1);
   const [isRunTransitionPending, startRunTransition] = useTransition();
 
   useEffect(() => {
@@ -599,7 +609,18 @@ export default function Page() {
         window.localStorage.removeItem(USER_STORAGE_KEY);
       }
     }
+    setAutoExecutionEnabled(window.localStorage.getItem(AUTO_EXECUTE_STORAGE_KEY) === "true");
+    const storedRunCount = Number(window.localStorage.getItem(AUTO_RUN_COUNT_STORAGE_KEY) || "1");
+    setAutoRunCount(Number.isFinite(storedRunCount) && storedRunCount > 0 ? Math.min(Math.round(storedRunCount), 10) : 1);
   }, []);
+
+  useEffect(() => {
+    window.localStorage.setItem(AUTO_EXECUTE_STORAGE_KEY, autoExecutionEnabled ? "true" : "false");
+  }, [autoExecutionEnabled]);
+
+  useEffect(() => {
+    window.localStorage.setItem(AUTO_RUN_COUNT_STORAGE_KEY, String(autoRunCount));
+  }, [autoRunCount]);
 
   useEffect(() => {
     async function loadHealth() {
@@ -893,41 +914,84 @@ export default function Page() {
     return response;
   }
 
+  async function runSingleWorkflow({ tickerOverride, confirmExecution = false, shouldAutoExecute = false }) {
+    const payload = {
+      ...(tickerOverride ? { ticker: tickerOverride } : {}),
+      ...(confirmExecution ? { confirm_execution: true } : {}),
+      ...(shouldAutoExecute ? { auto_execute: true } : {}),
+    };
+    const response = await apiFetch("/api/run", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+    if (!response.ok) {
+      throw new Error((await response.text()) || "workflow run failed");
+    }
+    return response.json();
+  }
+
   async function runPlatform(confirmExecution = false) {
-    const symbol = ticker.trim().toUpperCase();
-    const activeTicker = confirmExecution ? (workflowState?.ticker || symbol) : symbol;
+    const batchTickers = parseTickerBatch(ticker);
+    const fallbackTicker = ticker.trim().toUpperCase();
+    const activeTicker = confirmExecution ? (workflowState?.ticker || fallbackTicker) : fallbackTicker;
+    const shouldAutoExecute = !confirmExecution && autoExecutionEnabled;
+    const totalCycles = confirmExecution ? 1 : Math.max(1, Math.min(autoRunCount, 10));
+    const queue =
+      confirmExecution
+        ? [{ tickerOverride: activeTicker || null, cycle: 1 }]
+        : batchTickers.length
+        ? Array.from({ length: totalCycles }, (_, cycleIndex) =>
+            batchTickers.map((tickerItem) => ({ tickerOverride: tickerItem, cycle: cycleIndex + 1 }))
+          ).flat()
+        : Array.from({ length: totalCycles }, (_, cycleIndex) => ({
+            tickerOverride: null,
+            cycle: cycleIndex + 1,
+          }));
+
     setRunPending(true);
     try {
-      const payload = {
-        ...(activeTicker ? { ticker: activeTicker } : {}),
-        ...(confirmExecution ? { confirm_execution: true } : {}),
-      };
-      const response = await apiFetch("/api/run", {
-        method: "POST",
-        body: JSON.stringify(payload),
-      });
-      if (!response.ok) {
-        throw new Error((await response.text()) || "workflow run failed");
+      const completedStates = [];
+
+      for (const [index, item] of queue.entries()) {
+        const state = await runSingleWorkflow({
+          tickerOverride: item.tickerOverride,
+          confirmExecution,
+          shouldAutoExecute,
+        });
+        completedStates.push(state);
+        setWorkflowState(state);
+        setMessages((current) => [
+          ...current,
+          {
+            role: "assistant",
+            content:
+              queue.length > 1
+                ? `Completed ${index + 1}/${queue.length}: ${state.ticker} finished with ${state.execution_status || "PENDING"}.`
+                : state.scanner_mode === "manual"
+                ? `Ran the manual override for ${state.ticker}. You can ask why the trade was approved, rejected, or what to do next.`
+                : `Scanned the market and selected ${state.ticker}. You can ask why this candidate won or what the next step should be.`,
+          },
+        ]);
       }
-      const state = await response.json();
-      setWorkflowState(state);
-      setMessages((current) => [
-        ...current,
-        {
-          role: "assistant",
-          content:
-            state.scanner_mode === "manual"
-              ? `Ran the manual override for ${state.ticker}. You can ask why the trade was approved, rejected, or what to do next.`
-              : `Scanned the market and selected ${state.ticker}. You can ask why this candidate won or what the next step should be.`,
-        },
-      ]);
-      pushToast(
-        confirmExecution && state.execution_status === "SUBMITTED"
-          ? `Execution submitted for ${state.ticker}.`
-          : state.scanner_mode === "manual"
-          ? `Completed workflow for ${state.ticker}.`
-          : `Completed autonomous scan and selected ${state.ticker}.`
-      );
+
+      const submittedCount = completedStates.filter((state) => state.execution_status === "SUBMITTED").length;
+      const awaitingCount = completedStates.filter((state) => state.execution_status === "AWAITING_CONFIRMATION").length;
+      const latestState = completedStates[completedStates.length - 1];
+
+      if (queue.length > 1) {
+        pushToast(
+          `Completed ${queue.length} runs. Submitted ${submittedCount} order${submittedCount === 1 ? "" : "s"}${awaitingCount ? `, ${awaitingCount} awaiting approval` : ""}.`
+        );
+      } else if (confirmExecution && latestState?.execution_status === "SUBMITTED") {
+        pushToast(`Execution submitted for ${latestState.ticker}.`);
+      } else if (shouldAutoExecute && latestState?.execution_status === "SUBMITTED") {
+        pushToast(`Auto execution submitted for ${latestState.ticker}.`);
+      } else if (latestState?.scanner_mode === "manual") {
+        pushToast(`Completed workflow for ${latestState.ticker}.`);
+      } else if (latestState?.ticker) {
+        pushToast(`Completed autonomous scan and selected ${latestState.ticker}.`);
+      }
+
       if (token) {
         const historyResponse = await apiFetch("/api/history");
         if (historyResponse.ok) {
@@ -1053,6 +1117,7 @@ export default function Page() {
   const awaitingExecutionConfirmation = workflowState?.execution_status === "AWAITING_CONFIRMATION";
   const scanCandidates = workflowState?.scan_candidates || [];
   const executionConnection = connectedIntegrations.find((connection) => connection.supports_execution);
+  const canEnableAutoExecution = Boolean(token && executionConnection);
   const strategyConfidence = percent(workflowState?.strategy_confidence);
   const riskControlsCount = (workflowState?.risk_controls_triggered || []).length;
   const selectedMode = workflowState?.scanner_mode === "manual" ? "Manual Override" : "Autonomous Scan";
@@ -1164,16 +1229,16 @@ export default function Page() {
                 id="ticker-input"
                 type="text"
                 value={ticker}
-                maxLength={10}
+                maxLength={120}
                 autoComplete="off"
-                placeholder="Optional ticker override"
+                placeholder="Optional ticker override(s): AAPL, MSFT, NVDA"
                 onChange={(event) => setTicker(event.target.value)}
               />
               <button type="submit" disabled={runPending || isRunTransitionPending}>
                 {runPending || isRunTransitionPending ? "Running..." : "Run"}
               </button>
             </form>
-            <p className="input-help">Leave blank to auto-select a candidate.</p>
+            <p className="input-help">Leave blank to auto-select a candidate, or enter multiple comma-separated tickers.</p>
             <button type="button" className="command-trigger" onClick={() => setShowCommandPalette(true)}>
               Open Command Palette
               <span>Ctrl/⌘ K</span>
@@ -1209,11 +1274,6 @@ export default function Page() {
               <TopStat label="Mode" value={workflowState ? selectedMode : "Standby"} />
               <TopStat label="Confidence" value={workflowState ? strategyConfidence : "--"} tone="accent" />
               <TopStat label="Controls" value={workflowState ? String(riskControlsCount) : "--"} />
-              <TopStat
-                label="Execution"
-                value={execution}
-                tone={execution.toLowerCase() === "submitted" ? "good" : execution.toLowerCase() === "failed" ? "bad" : "neutral"}
-              />
               </div>
             </div>
           </section>
@@ -1287,12 +1347,50 @@ export default function Page() {
               <div className="metric-pill-row">
                 <Pill label="Execution" value={execution} />
               </div>
+              <label className={`execution-toggle-row ${canEnableAutoExecution ? "" : "is-disabled"}`}>
+                <span>
+                  <strong>Auto Execute</strong>
+                  <small>
+                    {canEnableAutoExecution
+                      ? "Submit market orders automatically when a run passes risk."
+                      : "Sign in and connect a broker to enable auto execution."}
+                  </small>
+                </span>
+                <input
+                  type="checkbox"
+                  checked={autoExecutionEnabled}
+                  disabled={!canEnableAutoExecution || runPending || isRunTransitionPending}
+                  onChange={(event) => setAutoExecutionEnabled(event.target.checked)}
+                />
+              </label>
+              <label className="execution-repeat-row">
+                <span>
+                  <strong>Auto Run Count</strong>
+                  <small>Run the workflow this many times in sequence. Useful for multiple auto-selected candidates or repeated order placement.</small>
+                </span>
+                <input
+                  type="number"
+                  min="1"
+                  max="10"
+                  value={autoRunCount}
+                  disabled={runPending || isRunTransitionPending}
+                  onChange={(event) => {
+                    const nextValue = Number(event.target.value);
+                    setAutoRunCount(Number.isFinite(nextValue) ? Math.max(1, Math.min(Math.round(nextValue), 10)) : 1);
+                  }}
+                />
+              </label>
               <p className="metric-subtle">
                 {workflowState?.execution_detail ||
                   (executionConnection
                     ? "Connected execution path available."
                     : "Execution requires a connected provider.")}
               </p>
+              {autoExecutionEnabled && canEnableAutoExecution ? (
+                <p className="metric-subtle execution-auto-note">
+                  Auto execution is armed. New runs can submit orders immediately when risk approves.
+                </p>
+              ) : null}
               {awaitingExecutionConfirmation ? (
                 <button
                   type="button"
@@ -1464,8 +1562,8 @@ export default function Page() {
           <>
             <div className="copilot-dock-head">
               <div>
-                <p className="section-kicker">Operator Console</p>
-                <h3>Workspace Chat</h3>
+                <p className="section-kicker">Assistant</p>
+                <h3>AI Copilot</h3>
               </div>
               <div className="copilot-dock-actions">
                 <button
