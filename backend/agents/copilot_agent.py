@@ -162,7 +162,7 @@ class CopilotAgent:
             final_state = await self._run_workflow(
                 ticker=ticker,
                 broker_connection=broker_connection,
-                allow_execution=True,
+                allow_execution=False,
             )
             return final_state
         return {"error": f"Unsupported action: {plan.action}"}

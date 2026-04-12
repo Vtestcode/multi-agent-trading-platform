@@ -93,6 +93,24 @@ def list_workflow_run_states(db: Session | None, user: User | None, limit: int =
     return [deserialize_workflow_run(run) for run in list_workflow_runs(db, user, limit=limit)]
 
 
+def latest_workflow_run_state(db: Session | None, user: User | None) -> dict[str, Any] | None:
+    runs = list_workflow_run_states(db, user, limit=1)
+    return runs[0] if runs else None
+
+
+def has_pending_execution_approval(db: Session | None, user: User | None, ticker: str | None) -> bool:
+    if db is None or user is None or not ticker:
+        return False
+    latest_run = latest_workflow_run_state(db, user)
+    if not latest_run:
+        return False
+    return (
+        str(latest_run.get("ticker") or "").strip().upper() == ticker.strip().upper()
+        and str(latest_run.get("execution_status") or "") == "AWAITING_CONFIRMATION"
+        and bool(latest_run.get("risk_approved"))
+    )
+
+
 def summarize_workflow_runs(runs: list[dict[str, Any]], limit: int = 5) -> list[dict[str, Any]]:
     summaries: list[dict[str, Any]] = []
     for run in runs[:limit]:

@@ -8,6 +8,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field
 from langsmith import traceable
 from langsmith.middleware import TracingMiddleware
@@ -42,6 +43,7 @@ from integrations import (
 )
 from history_store import (
     create_workflow_run,
+    has_pending_execution_approval,
     list_workflow_runs,
     list_workflow_run_states,
     recent_unique_tickers,
@@ -294,15 +296,29 @@ def get_history(
 
 @app.post("/api/run")
 @traceable(name="api_run_workflow")
-def run_workflow(
+async def run_workflow(
     payload: RunRequest,
     current_user: User | None = Depends(get_optional_user),
     db: Session = Depends(get_db),
 ) -> dict:
     ticker = payload.ticker.strip().upper() if payload.ticker else None
     confirm_execution = bool(payload.confirm_execution)
+    if confirm_execution:
+        if current_user is None:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Sign in is required before execution can be approved.",
+            )
+        if not has_pending_execution_approval(db, current_user, ticker):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    "Execution approval is only allowed for the most recent pending trade candidate. "
+                    "Run analysis first, then approve the pending execution from the workspace."
+                ),
+            )
     connection = get_broker_connection(db, current_user.id, "alpaca") if current_user else None
-    excluded_tickers = recent_unique_tickers(db, current_user, limit=3) if current_user and not ticker else []
+    excluded_tickers = recent_unique_tickers(db, current_user, limit=3) if current_user and not ticker and not confirm_execution else []
     broker_connection = None
     broker_connection_summary = None
     broker_connection_error = None
@@ -324,12 +340,13 @@ def run_workflow(
             }
 
     try:
-        result = run_trading_loop_sync(
-            ticker=ticker,
-            broker_connection=broker_connection,
-            broker_connection_summary=broker_connection_summary,
-            excluded_tickers=excluded_tickers,
-            allow_execution=confirm_execution and broker_connection is not None,
+        result = await run_in_threadpool(
+            run_trading_loop_sync,
+            ticker,
+            broker_connection,
+            broker_connection_summary,
+            excluded_tickers,
+            confirm_execution and broker_connection is not None,
         )
     except Exception as exc:
         logger.exception("Workflow execution failed")
