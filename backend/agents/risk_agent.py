@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field
 from pydantic_ai import Agent
 
 from agents.llm_common import compact_json, resolve_model_name
+from agents.tool_registry import ToolContext, TradingToolRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -39,12 +40,14 @@ class RiskAgent:
         min_avg_daily_volume: int = DEFAULT_MIN_AVG_DAILY_VOLUME,
         timeout_seconds: float = 20.0,
         model_name: str | None = None,
+        tool_registry: TradingToolRegistry | None = None,
     ) -> None:
         self.paper_base_url = paper_base_url.rstrip("/")
         self.max_position_pct = max_position_pct
         self.min_avg_daily_volume = min_avg_daily_volume
         self.timeout_seconds = timeout_seconds
         self.model_name = resolve_model_name(model_name)
+        self.tool_registry = tool_registry or TradingToolRegistry()
         self.agent = Agent(
             self.model_name,
             output_type=RiskDecision,
@@ -65,7 +68,9 @@ class RiskAgent:
             logger.info("[RiskAgent] No broker connection available for %s; rejecting execution path.", ticker)
             return self._missing_broker_response(ticker=ticker, signal=signal, market_data=market_data)
 
-        account = await self._fetch_account(broker_connection)
+        account = await self._fetch_account(state, broker_connection)
+        open_positions = await self._fetch_open_positions(state, broker_connection)
+        portfolio_history = await self._fetch_portfolio_history(state, broker_connection)
 
         buying_power = float(account.get("buying_power") or 0.0)
         current_price = float(market_data.get("current_price") or 0.0)
@@ -78,6 +83,8 @@ class RiskAgent:
             signal=signal,
             market_data=market_data,
             account=account,
+            open_positions=open_positions,
+            portfolio_history=portfolio_history,
             buying_power=buying_power,
             max_notional_allowed=max_notional_allowed,
             max_share_count=max_share_count,
@@ -106,7 +113,19 @@ class RiskAgent:
         logger.info("[RiskAgent] %s", normalized["risk_reason"])
         return normalized
 
-    async def _fetch_account(self, broker_connection: Dict[str, Any]) -> Dict[str, Any]:
+    async def _fetch_account(self, state: Dict[str, Any], broker_connection: Dict[str, Any]) -> Dict[str, Any]:
+        context = ToolContext(state=state, agent_name="risk")
+        try:
+            return await self.tool_registry.call_tool(
+                "get_account_balance",
+                context=context,
+                broker_connection=broker_connection,
+            )
+        except Exception as exc:
+            logger.warning("[RiskAgent] Falling back to direct account fetch: %s", exc)
+            return await self._fetch_account_direct(broker_connection)
+
+    async def _fetch_account_direct(self, broker_connection: Dict[str, Any]) -> Dict[str, Any]:
         url = f"{self.paper_base_url}/v2/account"
         headers = {
             "APCA-API-KEY-ID": broker_connection["api_key"],
@@ -129,6 +148,30 @@ class RiskAgent:
             payload.get("equity"),
         )
         return payload
+
+    async def _fetch_open_positions(self, state: Dict[str, Any], broker_connection: Dict[str, Any]) -> list[Dict[str, Any]]:
+        context = ToolContext(state=state, agent_name="risk")
+        try:
+            return await self.tool_registry.call_tool(
+                "get_open_positions",
+                context=context,
+                broker_connection=broker_connection,
+            )
+        except Exception as exc:
+            logger.warning("[RiskAgent] get_open_positions failed: %s", exc)
+            return []
+
+    async def _fetch_portfolio_history(self, state: Dict[str, Any], broker_connection: Dict[str, Any]) -> Dict[str, Any]:
+        context = ToolContext(state=state, agent_name="risk")
+        try:
+            return await self.tool_registry.call_tool(
+                "get_portfolio_history",
+                context=context,
+                broker_connection=broker_connection,
+            )
+        except Exception as exc:
+            logger.warning("[RiskAgent] get_portfolio_history failed: %s", exc)
+            return {"status": "unavailable", "detail": str(exc)}
 
     def _missing_broker_response(self, ticker: str, signal: str, market_data: Dict[str, Any]) -> Dict[str, Any]:
         avg_daily_volume = float(market_data.get("avg_daily_volume") or 0.0)
@@ -166,6 +209,8 @@ class RiskAgent:
         signal: str,
         market_data: Dict[str, Any],
         account: Dict[str, Any],
+        open_positions: list[Dict[str, Any]],
+        portfolio_history: Dict[str, Any],
         buying_power: float,
         max_notional_allowed: float,
         max_share_count: int,
@@ -182,6 +227,10 @@ class RiskAgent:
             f"{compact_json(market_data)}\n\n"
             "Account JSON:\n"
             f"{compact_json(account)}\n\n"
+            "Open positions JSON:\n"
+            f"{compact_json({'positions': open_positions})}\n\n"
+            "Portfolio history JSON:\n"
+            f"{compact_json(portfolio_history)}\n\n"
             "Risk guidance:\n"
             "- Approve only when the signal is actionable and the trade fits liquidity and buying-power policy.\n"
             "- Reject non-BUY signals.\n"

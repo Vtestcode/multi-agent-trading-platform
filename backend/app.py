@@ -43,6 +43,7 @@ from integrations import (
 from history_store import (
     create_workflow_run,
     list_workflow_runs,
+    list_workflow_run_states,
     recent_unique_tickers,
     serialize_workflow_run,
 )
@@ -98,6 +99,7 @@ def startup() -> None:
 
 class RunRequest(BaseModel):
     ticker: str | None = Field(default=None, min_length=1, max_length=10, description="Optional manual ticker override")
+    confirm_execution: bool = False
 
 
 class HealthResponse(BaseModel):
@@ -116,6 +118,8 @@ class CopilotResponse(BaseModel):
     reply: str
     model: str
     has_workflow_state: bool
+    action_taken: str | None = None
+    action_result: dict | list | str | None = None
 
 
 class RegisterRequest(BaseModel):
@@ -296,6 +300,7 @@ def run_workflow(
     db: Session = Depends(get_db),
 ) -> dict:
     ticker = payload.ticker.strip().upper() if payload.ticker else None
+    confirm_execution = bool(payload.confirm_execution)
     connection = get_broker_connection(db, current_user.id, "alpaca") if current_user else None
     excluded_tickers = recent_unique_tickers(db, current_user, limit=3) if current_user and not ticker else []
     broker_connection = None
@@ -324,6 +329,7 @@ def run_workflow(
             broker_connection=broker_connection,
             broker_connection_summary=broker_connection_summary,
             excluded_tickers=excluded_tickers,
+            allow_execution=confirm_execution and broker_connection is not None,
         )
     except Exception as exc:
         logger.exception("Workflow execution failed")
@@ -338,6 +344,7 @@ def run_workflow(
     result["current_user"] = UserResponse.from_model(current_user).model_dump() if current_user else None
     result["broker_connection_error"] = broker_connection_error
     result["excluded_tickers"] = excluded_tickers
+    result["execution_confirmation_armed"] = confirm_execution and broker_connection is not None
     if current_user:
         run_record = create_workflow_run(db, current_user, result)
         result["history_id"] = run_record.id
@@ -347,13 +354,28 @@ def run_workflow(
 
 @app.post("/api/copilot", response_model=CopilotResponse)
 @traceable(name="api_copilot_chat")
-async def copilot_chat(payload: CopilotRequest, current_user: User | None = Depends(get_optional_user)) -> CopilotResponse:
+async def copilot_chat(
+    payload: CopilotRequest,
+    current_user: User | None = Depends(get_optional_user),
+    db: Session = Depends(get_db),
+) -> CopilotResponse:
     workflow_state = app.state.last_workflow_state
-    reply = await app.state.copilot.answer(payload.message, workflow_state)
+    history_states = list_workflow_run_states(db, current_user, limit=8) if current_user else []
+    if workflow_state is None and history_states:
+        workflow_state = history_states[0]
+    copilot_result = await app.state.copilot.answer(payload.message, workflow_state, db=db, current_user=current_user)
+    action_result = copilot_result.get("action_result")
+    if isinstance(action_result, dict) and action_result.get("ticker") and action_result.get("signal"):
+        app.state.last_workflow_state = action_result
+        if current_user and copilot_result.get("action_taken") in {"run_workflow", "execute_trade"}:
+            run_record = create_workflow_run(db, current_user, action_result)
+            action_result["history_id"] = run_record.id
     return CopilotResponse(
-        reply=reply,
+        reply=str(copilot_result.get("reply") or ""),
         model=app.state.copilot.model_name,
-        has_workflow_state=workflow_state is not None,
+        has_workflow_state=workflow_state is not None or bool(history_states),
+        action_taken=copilot_result.get("action_taken"),
+        action_result=action_result,
     )
 
 

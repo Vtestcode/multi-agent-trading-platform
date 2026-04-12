@@ -64,6 +64,52 @@ def serialize_workflow_run(run: WorkflowRun) -> dict[str, Any]:
     }
 
 
+def deserialize_workflow_run(run: WorkflowRun) -> dict[str, Any]:
+    state: dict[str, Any] = {}
+    if run.workflow_state_json:
+        try:
+            state = json.loads(run.workflow_state_json)
+        except json.JSONDecodeError:
+            state = {"raw_state": run.workflow_state_json}
+    state.update(
+        {
+            "id": run.id,
+            "ticker": run.ticker,
+            "scanner_mode": run.scanner_mode,
+            "signal": run.signal,
+            "execution_status": run.execution_status,
+            "risk_approved": run.risk_approved,
+            "strategy_confidence": run.strategy_confidence,
+            "summary": run.summary,
+            "created_at": run.created_at.isoformat() if run.created_at else None,
+        }
+    )
+    return state
+
+
+def list_workflow_run_states(db: Session | None, user: User | None, limit: int = 20) -> list[dict[str, Any]]:
+    if db is None or user is None:
+        return []
+    return [deserialize_workflow_run(run) for run in list_workflow_runs(db, user, limit=limit)]
+
+
+def summarize_workflow_runs(runs: list[dict[str, Any]], limit: int = 5) -> list[dict[str, Any]]:
+    summaries: list[dict[str, Any]] = []
+    for run in runs[:limit]:
+        summaries.append(
+            {
+                "id": run.get("id"),
+                "ticker": run.get("ticker"),
+                "signal": run.get("signal"),
+                "execution_status": run.get("execution_status"),
+                "risk_approved": run.get("risk_approved"),
+                "summary": run.get("summary"),
+                "created_at": run.get("created_at"),
+            }
+        )
+    return summaries
+
+
 def _serialize_confidence(value: Any) -> str | None:
     if value is None:
         return None
@@ -78,4 +124,4 @@ def _build_summary(state: dict[str, Any]) -> str:
     signal = str(state.get("signal") or "PENDING")
     execution_status = str(state.get("execution_status") or "PENDING")
     scanner_mode = str(state.get("scanner_mode") or "auto")
-    return f"{ticker} · {scanner_mode} · {signal} · {execution_status}"
+    return " | ".join([ticker, scanner_mode, signal, execution_status])

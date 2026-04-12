@@ -8,9 +8,10 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, Literal
 
-import httpx
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
+
+from agents.tool_registry import ToolContext, TradingToolRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -47,11 +48,13 @@ class ExecutionAgent:
         mcp_command: str = DEFAULT_MCP_COMMAND,
         mcp_args: list[str] | None = None,
         timeout_seconds: float = 20.0,
+        tool_registry: TradingToolRegistry | None = None,
     ) -> None:
         self.execution_provider = (execution_provider or os.getenv("EXECUTION_PROVIDER", DEFAULT_EXECUTION_PROVIDER)).strip()
         self.mcp_command = os.getenv("ALPACA_MCP_COMMAND", mcp_command)
         self.mcp_args = self._resolve_args(mcp_args)
         self.timeout_seconds = timeout_seconds
+        self.tool_registry = tool_registry or TradingToolRegistry()
 
     async def run(self, state: Dict[str, Any]) -> Dict[str, Any]:
         ticker = state.get("ticker", "UNKNOWN")
@@ -59,6 +62,7 @@ class ExecutionAgent:
         share_count = int(state.get("share_count", 0) or 0)
         signal = state.get("signal", "HOLD")
         broker_connection = state.get("broker_connection")
+        allow_execution = bool(state.get("allow_execution", False))
 
         if not risk_approved or signal != "BUY" or share_count < 1:
             detail = (
@@ -77,6 +81,23 @@ class ExecutionAgent:
                 ExecutionResult(status="SKIPPED", detail=detail, tool_name_used=self.execution_provider)
             )
 
+        if not allow_execution:
+            detail = (
+                f"Execution paused for {ticker}: risk checks passed, but trade submission requires explicit confirmation. "
+                "Approve execution from the workspace to place the order."
+            )
+            logger.info("[ExecutionAgent] %s", detail)
+            result = self._result_to_state(
+                ExecutionResult(
+                    status="AWAITING_CONFIRMATION",
+                    detail=detail,
+                    order_response=None,
+                    tool_name_used=self.execution_provider,
+                )
+            )
+            result["execution_requires_confirmation"] = True
+            return result
+
         logger.info(
             "[ExecutionAgent] Preparing execution for %s qty=%s provider=%s",
             ticker,
@@ -92,7 +113,8 @@ class ExecutionAgent:
                     broker_connection=broker_connection,
                 )
             else:
-                order_response, tool_name = await self._place_order_via_rest(
+                order_response, tool_name = await self._place_order_via_registry(
+                    state=state,
                     ticker=ticker,
                     qty=share_count,
                     broker_connection=broker_connection,
@@ -119,35 +141,23 @@ class ExecutionAgent:
                 )
             )
 
-    async def _place_order_via_rest(
+    async def _place_order_via_registry(
         self,
+        state: Dict[str, Any],
         ticker: str,
         qty: int,
         broker_connection: Dict[str, Any],
     ) -> tuple[Dict[str, Any], str]:
-        url = f"{ALPACA_PAPER_BASE_URL}/v2/orders"
-        headers = {
-            "APCA-API-KEY-ID": broker_connection["api_key"],
-            "APCA-API-SECRET-KEY": broker_connection["secret_key"],
-        }
-        payload = {
-            "symbol": ticker,
-            "qty": qty,
-            "side": "buy",
-            "type": "market",
-            "time_in_force": "day",
-        }
-
-        async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
-            response = await client.post(url, headers=headers, json=payload)
-
-        if response.status_code not in (200, 201):
-            raise ExecutionError(
-                f"Alpaca REST order failed with status={response.status_code} body={response.text[:300]}"
-            )
-
-        parsed = response.json()
-        return parsed, "alpaca_rest"
+        context = ToolContext(state=state, agent_name="execution")
+        parsed = await self.tool_registry.call_tool(
+            "place_market_order",
+            context=context,
+            symbol=ticker,
+            qty=qty,
+            side="buy",
+            broker_connection=broker_connection,
+        )
+        return parsed, "place_market_order"
 
     async def _place_order_via_mcp(
         self,
@@ -280,4 +290,5 @@ class ExecutionAgent:
             "execution_detail": data["detail"],
             "order_response": data["order_response"],
             "execution_tool": data["tool_name_used"],
+            "execution_requires_confirmation": False,
         }
