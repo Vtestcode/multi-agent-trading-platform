@@ -1,24 +1,13 @@
 # Multi Agent Equity Trading Platform
 
-This project is now split into two deployable applications:
+AI-powered multi-agent equity trading platform with autonomous market scanning, strategy and risk analysis, execution approval workflows, and a real-time operator dashboard.
 
-- `frontend/` for the operator dashboard, intended for Vercel
-- `backend/` for the API, intended for Heroku
+Backend is handled by LangGraph orchestration, PydanticAI decision agents, market data, risk checks, execution, and the AI copilot.
 
-The backend handles LangGraph orchestration, PydanticAI decision agents, market data, risk checks, execution, and the AI copilot. The frontend is now a real Next.js application that calls the backend over HTTP.
-
-## Structure
-- `frontend/` - Next.js frontend for Vercel
-- `frontend/app/` - App Router pages and styles
-- `frontend/package.json` - frontend dependencies and scripts
-- `backend/` - FastAPI API service
-- `backend/agents/` - market, strategy, risk, execution, and copilot agents
-- `backend/Procfile` - Heroku process definition
-- `backend/requirements.txt` - backend Python dependencies
-- `backend/models.py` - user model persisted to Heroku Postgres
-- `backend/auth.py` - JWT, password auth, and Google auth helpers
+The workflow includes a stateful coordinator agent that maintains shared workflow state, delegates work to specialist agents, records tool usage, and runs validation loops over strategy, risk, and execution outputs before the run is finalized.
 
 ## Local Development
+clone or download
 
 ### Backend
 
@@ -26,9 +15,9 @@ The backend handles LangGraph orchestration, PydanticAI decision agents, market 
 cd backend
 python -m venv .venv
 # Windows
-.venv\Scripts\activate
-# macOS/Linux
-# source .venv/bin/activate
+#.venv\Scripts\activate
+macOS/Linux
+source .venv/bin/activate
 
 pip install -r requirements.txt
 uvicorn app:app --reload
@@ -85,50 +74,7 @@ NEXT_PUBLIC_API_BASE_URL=http://127.0.0.1:8000
 NEXT_PUBLIC_GOOGLE_CLIENT_ID=your_google_oauth_client_id.apps.googleusercontent.com
 ```
 
-## Deployment
-
-### Deploy Frontend To Vercel
-1. Point Vercel at the `frontend/` directory.
-2. Set `NEXT_PUBLIC_API_BASE_URL` to your deployed Heroku backend URL.
-3. Set `NEXT_PUBLIC_GOOGLE_CLIENT_ID` to your Google OAuth client ID.
-4. Deploy as a Next.js app.
-
-### Deploy Backend To Heroku
-1. Create or use a Heroku app for the backend.
-2. Attach Heroku Postgres and set `DATABASE_URL`.
-3. Deploy the `backend/` directory as the Heroku app.
-4. Configure the backend environment variables on Heroku.
-5. Set `CORS_ALLOW_ORIGINS` to include your Vercel frontend origin.
-6. Heroku will use `backend/Procfile` to start the API.
-
-Example git-based deploy from the repo root:
-
-```bash
-git init
-git add .
-git commit -m "Initial backend deploy"
-heroku apps:create your-backend-app-name
-heroku git:remote -a your-backend-app-name
-git subtree push --prefix backend heroku main
-```
-
-Heroku Python runtime is pinned with `backend/.python-version`.
-
-## API Endpoints
-- `GET /api/health` - backend health check
-- `POST /api/auth/register` - create a local user and return a JWT
-- `POST /api/auth/login` - local email/password login returning a JWT
-- `POST /api/auth/google` - exchange a Google credential for a JWT
-- `GET /api/auth/me` - fetch the current authenticated user
-- `GET /api/integrations/providers` - list supported provider types and their credential requirements
-- `GET /api/integrations` - list the signed-in user's connected providers
-- `GET /api/integrations/{provider}` - fetch one signed-in user's provider connection
-- `POST /api/integrations/{provider}` - save or update a provider connection
-- `DELETE /api/integrations/{provider}` - disconnect a provider
-- `POST /api/run` - run the autonomous workflow, with optional manual ticker override
-- `POST /api/copilot` - ask the AI copilot about the latest workflow state
-
-## LangSmith Observability
+## LangSmith Observability (Optional)
 - LangSmith tracing can be enabled entirely through backend environment variables.
 - LangGraph workflow runs, API endpoints, and PydanticAI agent calls are prepared for LangSmith tracing.
 - Set `LANGSMITH_TRACING=true`, `LANGSMITH_API_KEY`, and optionally `LANGSMITH_PROJECT` on Heroku.
@@ -136,6 +82,8 @@ Heroku Python runtime is pinned with `backend/.python-version`.
 
 ## Platform Design
 - The default behavior is autonomous: scan a configured equity universe, pick the strongest momentum candidate, and run the trading workflow on that selection.
+- The coordinator agent maintains shared state, tracks delegation steps, and stores a tool call history for every workflow run.
+- Strategy, risk, and execution each pass through bounded validation loops so malformed outputs are normalized before the workflow continues.
 - Signing in is optional for public users. Guests can scan, analyze, and use the copilot.
 - Users authenticate with JWT-backed sessions, with local email/password auth and Google sign-in support.
 - User records are stored in Postgres, which maps directly to Heroku Postgres for deployment.
@@ -144,12 +92,14 @@ Heroku Python runtime is pinned with `backend/.python-version`.
 - Risk decisions are generated by an LLM, then constrained by deterministic guardrails.
 - Execution defaults to direct Alpaca paper-trading REST using the signed-in user's own Alpaca connection for deployment reliability.
 - The copilot explains the latest run and helps operators understand next steps.
+- The copilot can now inspect saved run history, use the tool registry, launch scans and workflow runs, and attempt execution actions when the user is authenticated with a connected Alpaca account.
+
+## Tool Catalog
+- Market Data: `get_stock_bars`, `get_latest_quote`, `get_most_actives`, `check_market_clock`, `get_stock_news`
+- Strategy: `calculate_rsi`, `calculate_macd`, `get_sec_filing`, `get_earnings_calendar`, `get_vix_level`, `get_sector_performance`
+- Execution: `get_option_chain`, `place_option_order`, `get_crypto_bars`, `place_crypto_order`, `place_market_order`, `cancel_all_orders`, `close_all_positions`
+- Risk: `get_account_balance`, `get_open_positions`, `set_stop_loss_order`, `get_portfolio_history`
 
 ## MCP Execution Note
 - MCP is optional and intended for experimentation, not the default deployed path.
 - Set `EXECUTION_PROVIDER=mcp` only if you explicitly want MCP-based order placement.
-
-## Notes
-- The frontend and backend are intentionally decoupled for independent deployment.
-- The copilot currently uses the latest backend workflow state held in memory.
-- Persistent authenticated run history is stored in the configured database.

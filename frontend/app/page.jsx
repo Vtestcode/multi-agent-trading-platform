@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, useTransition } from "react";
 import Link from "next/link";
 
 const DEFAULT_API_BASE_URL = "http://127.0.0.1:8000";
@@ -128,33 +128,17 @@ function SkeletonText({ width = "100%" }) {
 }
 
 function PriceChart({ marketData, signal, loading }) {
-  if (loading) {
-    return (
-      <div className="chart-shell is-loading">
-        <div className="chart-skeleton-grid">
-          <SkeletonText width="42%" />
-          <SkeletonText width="78%" />
-          <SkeletonText width="64%" />
-        </div>
-      </div>
-    );
-  }
-
   const bars = marketData?.recent_bars || [];
-  if (!bars.length) {
-    return <div className="chart-empty">Run a workflow to load recent market history.</div>;
-  }
-
-  const highs = bars.map((bar) => Number(bar.high));
-  const lows = bars.map((bar) => Number(bar.low));
-  const minLow = Math.min(...lows);
-  const maxHigh = Math.max(...highs);
+  const hasBars = bars.length > 0;
+  const highs = hasBars ? bars.map((bar) => Number(bar.high)) : [];
+  const lows = hasBars ? bars.map((bar) => Number(bar.low)) : [];
+  const minLow = hasBars ? Math.min(...lows) : 0;
+  const maxHigh = hasBars ? Math.max(...highs) : 1;
   const range = Math.max(maxHigh - minLow, 1);
   const chartHeight = 208;
   const barWidth = 8;
   const gap = 5;
-  const width = bars.length * (barWidth + gap);
-
+  const width = Math.max(bars.length, 24) * (barWidth + gap);
   const yFor = (price) => chartHeight - ((price - minLow) / range) * (chartHeight - 14) - 7;
 
   return (
@@ -169,43 +153,71 @@ function PriceChart({ marketData, signal, loading }) {
           <span>{shortDate(marketData?.latest_close_date)}</span>
         </div>
       </div>
-      <svg className="price-chart" viewBox={`0 0 ${width} ${chartHeight}`} preserveAspectRatio="none" role="img" aria-label="Recent price chart">
-        {[0.2, 0.4, 0.6, 0.8].map((line) => (
-          <line
-            key={line}
-            x1="0"
-            x2={width}
-            y1={chartHeight * line}
-            y2={chartHeight * line}
-            className="chart-grid-line"
-          />
-        ))}
-        {bars.map((bar, index) => {
-          const x = index * (barWidth + gap) + 2;
-          const openY = yFor(Number(bar.open));
-          const closeY = yFor(Number(bar.close));
-          const highY = yFor(Number(bar.high));
-          const lowY = yFor(Number(bar.low));
-          const candleTop = Math.min(openY, closeY);
-          const candleHeight = Math.max(Math.abs(openY - closeY), 2);
-          const tone = Number(bar.close) >= Number(bar.open) ? "up" : "down";
+      <div className={`chart-viewport ${loading ? "is-loading" : ""}`}>
+        {loading ? (
+          <div className="chart-skeleton-grid">
+            <SkeletonText width="42%" />
+            <SkeletonText width="78%" />
+            <SkeletonText width="64%" />
+          </div>
+        ) : hasBars ? (
+          <svg className="price-chart" viewBox={`0 0 ${width} ${chartHeight}`} preserveAspectRatio="none" role="img" aria-label="Recent price chart">
+            {[0.2, 0.4, 0.6, 0.8].map((line) => (
+              <line
+                key={line}
+                x1="0"
+                x2={width}
+                y1={chartHeight * line}
+                y2={chartHeight * line}
+                className="chart-grid-line"
+              />
+            ))}
+            {bars.map((bar, index) => {
+              const x = index * (barWidth + gap) + 2;
+              const openY = yFor(Number(bar.open));
+              const closeY = yFor(Number(bar.close));
+              const highY = yFor(Number(bar.high));
+              const lowY = yFor(Number(bar.low));
+              const candleTop = Math.min(openY, closeY);
+              const candleHeight = Math.max(Math.abs(openY - closeY), 2);
+              const tone = Number(bar.close) >= Number(bar.open) ? "up" : "down";
 
-          return (
-            <g key={`${bar.date}-${index}`} className={`chart-candle ${tone}`}>
-              <line x1={x + barWidth / 2} x2={x + barWidth / 2} y1={highY} y2={lowY} className="chart-wick" />
-              <rect x={x} y={candleTop} width={barWidth} height={candleHeight} rx="2" className="chart-body" />
-            </g>
-          );
-        })}
-        <line x1="0" x2={width} y1={yFor(Number(marketData?.sma_50 || 0))} y2={yFor(Number(marketData?.sma_50 || 0))} className="chart-ma chart-ma-fast" />
-        <line x1="0" x2={width} y1={yFor(Number(marketData?.sma_200 || 0))} y2={yFor(Number(marketData?.sma_200 || 0))} className="chart-ma chart-ma-slow" />
-      </svg>
+              return (
+                <g key={`${bar.date}-${index}`} className={`chart-candle ${tone}`}>
+                  <line x1={x + barWidth / 2} x2={x + barWidth / 2} y1={highY} y2={lowY} className="chart-wick" />
+                  <rect x={x} y={candleTop} width={barWidth} height={candleHeight} rx="2" className="chart-body" />
+                </g>
+              );
+            })}
+            <line x1="0" x2={width} y1={yFor(Number(marketData?.sma_50 || 0))} y2={yFor(Number(marketData?.sma_50 || 0))} className="chart-ma chart-ma-fast" />
+            <line x1="0" x2={width} y1={yFor(Number(marketData?.sma_200 || 0))} y2={yFor(Number(marketData?.sma_200 || 0))} className="chart-ma chart-ma-slow" />
+          </svg>
+        ) : (
+          <div className="chart-empty">Run a workflow to load recent market history.</div>
+        )}
+      </div>
       <div className="chart-legend">
         <span><i className="legend-swatch fast" /> SMA 50</span>
         <span><i className="legend-swatch slow" /> SMA 200</span>
         <span><i className="legend-swatch candle" /> 24D candles</span>
       </div>
     </div>
+  );
+}
+
+function StatCard({ label, loading, children }) {
+  return (
+    <article className="metric card">
+      <p className="metric-label">{label}</p>
+      {loading ? (
+        <div className="metric-skeleton">
+          <SkeletonText width="50%" />
+          <SkeletonText width="72%" />
+        </div>
+      ) : (
+        children
+      )}
+    </article>
   );
 }
 
@@ -401,12 +413,7 @@ function AuthPanel({
         </button>
       </form>
 
-      {googleEnabled && googleReady ? (
-        <div className="google-auth-block">
-          <div className="auth-divider">or continue with Google</div>
-          <div ref={googleRef} className="google-signin-slot" />
-        </div>
-      ) : googleEnabled && googleError ? (
+      {googleEnabled && googleError ? (
         <div className="google-auth-block">
           <div className="auth-divider">Google sign-in unavailable</div>
           <div className="auth-helper">{googleError}</div>
@@ -414,7 +421,8 @@ function AuthPanel({
       ) : googleEnabled ? (
         <div className="google-auth-block">
           <div className="auth-divider">or continue with Google</div>
-          <div className="auth-helper">Loading Google sign-in…</div>
+          <div ref={googleRef} className="google-signin-slot" />
+          {!googleReady ? <div className="auth-helper">Loading Google sign-in…</div> : null}
         </div>
       ) : (
         <div className="google-auth-block">
@@ -554,7 +562,8 @@ export default function Page() {
   const [messages, setMessages] = useState([
     {
       role: "assistant",
-      content: "Ask about the latest run, why a trade was blocked, or what the next step should be. Sign-in is optional.",
+      content:
+        "Ask me to explain runs, compare history, scan the market, call platform tools, or execute a trade when your broker is connected.",
     },
   ]);
   const [token, setToken] = useState(null);
@@ -575,6 +584,7 @@ export default function Page() {
   const [googleScriptReady, setGoogleScriptReady] = useState(false);
   const [showCommandPalette, setShowCommandPalette] = useState(false);
   const [runHistory, setRunHistory] = useState([]);
+  const [isRunTransitionPending, startRunTransition] = useTransition();
 
   useEffect(() => {
     const storedToken = window.localStorage.getItem(TOKEN_STORAGE_KEY);
@@ -883,11 +893,15 @@ export default function Page() {
     return response;
   }
 
-  async function runPlatform() {
+  async function runPlatform(confirmExecution = false) {
     const symbol = ticker.trim().toUpperCase();
+    const activeTicker = confirmExecution ? (workflowState?.ticker || symbol) : symbol;
     setRunPending(true);
     try {
-      const payload = symbol ? { ticker: symbol } : {};
+      const payload = {
+        ...(activeTicker ? { ticker: activeTicker } : {}),
+        ...(confirmExecution ? { confirm_execution: true } : {}),
+      };
       const response = await apiFetch("/api/run", {
         method: "POST",
         body: JSON.stringify(payload),
@@ -908,7 +922,9 @@ export default function Page() {
         },
       ]);
       pushToast(
-        state.scanner_mode === "manual"
+        confirmExecution && state.execution_status === "SUBMITTED"
+          ? `Execution submitted for ${state.ticker}.`
+          : state.scanner_mode === "manual"
           ? `Completed workflow for ${state.ticker}.`
           : `Completed autonomous scan and selected ${state.ticker}.`
       );
@@ -924,6 +940,16 @@ export default function Page() {
     } finally {
       setRunPending(false);
     }
+  }
+
+  function handleRunSubmit(event, confirmExecution = false) {
+    if (event) {
+      event.preventDefault();
+      event.stopPropagation();
+    }
+    startRunTransition(() => {
+      void runPlatform(confirmExecution);
+    });
   }
 
   async function connectProvider() {
@@ -1022,8 +1048,9 @@ export default function Page() {
   const market = workflowState?.market_data || {};
   const risk = workflowState?.risk_details || {};
   const signal = workflowState?.signal || "PENDING";
-  const riskStatus = workflowState?.risk_approved ? "APPROVED" : "REJECTED";
+  const riskStatus = workflowState ? (workflowState?.risk_approved ? "APPROVED" : "REJECTED") : "PENDING";
   const execution = workflowState?.execution_status || "PENDING";
+  const awaitingExecutionConfirmation = workflowState?.execution_status === "AWAITING_CONFIRMATION";
   const scanCandidates = workflowState?.scan_candidates || [];
   const executionConnection = connectedIntegrations.find((connection) => connection.supports_execution);
   const strategyConfidence = percent(workflowState?.strategy_confidence);
@@ -1040,11 +1067,6 @@ export default function Page() {
       label: "Focus ticker override",
       description: "Jump to the manual ticker input",
       onSelect: () => document.getElementById("ticker-input")?.focus(),
-    },
-    {
-      label: "Open copilot",
-      description: "Expand the workspace assistant",
-      onSelect: () => setCopilotMinimized(false),
     },
     {
       label: "Open help",
@@ -1134,7 +1156,10 @@ export default function Page() {
             <label className="input-label" htmlFor="ticker-input">
               Manual Override
             </label>
-            <div className="input-row">
+            <form
+              className="input-row"
+              onSubmit={(event) => handleRunSubmit(event)}
+            >
               <input
                 id="ticker-input"
                 type="text"
@@ -1143,14 +1168,11 @@ export default function Page() {
                 autoComplete="off"
                 placeholder="Optional ticker override"
                 onChange={(event) => setTicker(event.target.value)}
-                onKeyDown={(event) => {
-                  if (event.key === "Enter") runPlatform();
-                }}
               />
-              <button type="button" onClick={runPlatform} disabled={runPending}>
-                {runPending ? "Running..." : "Run"}
+              <button type="submit" disabled={runPending || isRunTransitionPending}>
+                {runPending || isRunTransitionPending ? "Running..." : "Run"}
               </button>
-            </div>
+            </form>
             <p className="input-help">Leave blank to auto-select a candidate.</p>
             <button type="button" className="command-trigger" onClick={() => setShowCommandPalette(true)}>
               Open Command Palette
@@ -1216,8 +1238,8 @@ export default function Page() {
             </div>
           </section>
 
-          <section className="grid metrics-grid">
-            <article className="metric card">
+          <section className="grid analytics-grid analytics-grid-primary">
+            <article className="metric card selection-card">
               <p className="metric-label">Selected Candidate</p>
               {showLoadingSkeletons ? (
                 <div className="metric-skeleton">
@@ -1235,74 +1257,56 @@ export default function Page() {
                 </>
               )}
             </article>
-
-            <article className="metric card">
-              <p className="metric-label">Signal</p>
-              {showLoadingSkeletons ? (
-                <div className="metric-skeleton">
-                  <SkeletonText width="48%" />
-                  <SkeletonText width="62%" />
-                </div>
-              ) : (
-                <>
-                  <div className="metric-pill-row">
-                    <Pill label="Signal" value={signal} />
-                  </div>
-                  <p className="metric-subtle">
-                    {workflowState
-                      ? `Confidence ${percent(workflowState?.strategy_confidence)}`
-                      : "No signal yet."}
-                  </p>
-                </>
-              )}
-            </article>
-
-            <article className="metric card">
-              <p className="metric-label">Risk Gate</p>
-              {showLoadingSkeletons ? (
-                <div className="metric-skeleton">
-                  <SkeletonText width="54%" />
-                  <SkeletonText width="66%" />
-                </div>
-              ) : (
-                <>
-                  <div className="metric-pill-row">
-                    <Pill label="Risk" value={riskStatus} />
-                  </div>
-                  <p className="metric-subtle">
-                    Shares {workflowState?.share_count ?? 0} | Controls {(workflowState?.risk_controls_triggered || []).length}
-                  </p>
-                </>
-              )}
-            </article>
-
-            <article className="metric card">
-              <p className="metric-label">Execution</p>
-              {showLoadingSkeletons ? (
-                <div className="metric-skeleton">
-                  <SkeletonText width="50%" />
-                  <SkeletonText width="90%" />
-                </div>
-              ) : (
-                <>
-                  <div className="metric-pill-row">
-                    <Pill label="Execution" value={execution} />
-                  </div>
-                  <p className="metric-subtle">
-                    {workflowState?.execution_detail ||
-                      (executionConnection
-                        ? "Connected execution path available."
-                        : "Execution requires a connected provider.")}
-                  </p>
-                </>
-              )}
-            </article>
-          </section>
-
-          <section className="grid analytics-grid">
             <article className="card chart-card">
               <PriceChart marketData={market} signal={signal} loading={showLoadingSkeletons} />
             </article>
+          </section>
+
+          <section className="grid metrics-grid metrics-grid-secondary">
+            <StatCard label="Signal" loading={showLoadingSkeletons}>
+              <div className="metric-pill-row">
+                <Pill label="Signal" value={signal} />
+              </div>
+              <p className="metric-subtle">
+                {workflowState
+                  ? `Confidence ${percent(workflowState?.strategy_confidence)}`
+                  : "No signal yet."}
+              </p>
+            </StatCard>
+
+            <StatCard label="Risk Gate" loading={showLoadingSkeletons}>
+              <div className="metric-pill-row">
+                <Pill label="Risk" value={riskStatus} />
+              </div>
+              <p className="metric-subtle">
+                Shares {workflowState?.share_count ?? 0} | Controls {(workflowState?.risk_controls_triggered || []).length}
+              </p>
+            </StatCard>
+
+            <StatCard label="Execution" loading={showLoadingSkeletons}>
+              <div className="metric-pill-row">
+                <Pill label="Execution" value={execution} />
+              </div>
+              <p className="metric-subtle">
+                {workflowState?.execution_detail ||
+                  (executionConnection
+                    ? "Connected execution path available."
+                    : "Execution requires a connected provider.")}
+              </p>
+              {awaitingExecutionConfirmation ? (
+                <button
+                  type="button"
+                  className="execution-confirm-button"
+                  onClick={(event) => handleRunSubmit(event, true)}
+                  disabled={runPending || isRunTransitionPending}
+                >
+                  {runPending || isRunTransitionPending ? "Submitting..." : `Approve & Execute ${workflowState?.ticker || ""}`.trim()}
+                </button>
+              ) : null}
+            </StatCard>
+          </section>
+
+          <section className="grid analytics-grid">
             <article className="card control-card">
               <div className="card-head">
                 <div>
@@ -1460,11 +1464,10 @@ export default function Page() {
           <>
             <div className="copilot-dock-head">
               <div>
-                <p className="section-kicker">Assistant</p>
-                <h3>Workspace Assistant</h3>
+                <p className="section-kicker">Operator Console</p>
+                <h3>Workspace Chat</h3>
               </div>
               <div className="copilot-dock-actions">
-                <span className="chip">{`Copilot: ${copilotModel}`}</span>
                 <button
                   type="button"
                   className="copilot-toggle"
@@ -1486,7 +1489,7 @@ export default function Page() {
               <textarea
                 rows={4}
                 value={copilotInput}
-                placeholder="Why did the risk gate reject this trade?"
+                placeholder="Scan for setups, compare my last runs, or buy AAPL if risk approves"
                 onChange={(event) => setCopilotInput(event.target.value)}
                 onKeyDown={(event) => {
                   if ((event.ctrlKey || event.metaKey) && event.key === "Enter") askCopilot();
