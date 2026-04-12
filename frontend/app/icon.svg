@@ -1,0 +1,24 @@
+<svg width="128" height="128" viewBox="0 0 128 128" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="20" y1="16" x2="108" y2="112" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#3F4F6F"/>
+      <stop offset="1" stop-color="#1B2332"/>
+    </linearGradient>
+    <linearGradient id="ring" x1="30" y1="24" x2="94" y2="104" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#93B8FF"/>
+      <stop offset="1" stop-color="#4C83E5"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="46" y1="36" x2="88" y2="84" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#7DC4FF"/>
+      <stop offset="1" stop-color="#4FDA8B"/>
+    </linearGradient>
+  </defs>
+  <circle cx="64" cy="64" r="60" fill="url(#bg)"/>
+  <circle cx="64" cy="64" r="59.25" stroke="url(#ring)" stroke-opacity="0.28" stroke-width="1.5"/>
+  <circle cx="64" cy="64" r="46" fill="#111723" fill-opacity="0.86"/>
+  <path d="M40 79L54 62L64 69L84 44" stroke="url(#accent)" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M77 44H84V51" stroke="url(#accent)" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>
+  <rect x="38" y="50" width="8" height="30" rx="4" fill="#DDE8FF" fill-opacity="0.14"/>
+  <rect x="52" y="42" width="8" height="24" rx="4" fill="#DDE8FF" fill-opacity="0.18"/>
+  <rect x="66" y="56" width="8" height="18" rx="4" fill="#DDE8FF" fill-opacity="0.16"/>
+</svg>
