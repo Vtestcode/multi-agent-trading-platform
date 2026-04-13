@@ -69,6 +69,15 @@ function statusClass(value) {
   return "neutral";
 }
 
+function createChatMessage(role, content, extras = {}) {
+  return {
+    id: `${role}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    role,
+    content,
+    ...extras,
+  };
+}
+
 function Pill({ label, value }) {
   return (
     <span className={`pill ${statusClass(value)}`} key={`${label}-${value}`}>
@@ -572,11 +581,10 @@ export default function Page() {
   const [showCopilotStreamBox, setShowCopilotStreamBox] = useState(false);
   const [toast, setToast] = useState("");
   const [messages, setMessages] = useState([
-    {
-      role: "assistant",
-      content:
-        "Ask me to explain runs, compare history, scan the market, call platform tools, or execute a trade when your broker is connected.",
-    },
+    createChatMessage(
+      "assistant",
+      "Ask me to explain runs, compare history, scan the market, call platform tools, or execute a trade when your broker is connected."
+    ),
   ]);
   const [token, setToken] = useState(null);
   const [user, setUser] = useState(null);
@@ -1002,6 +1010,69 @@ export default function Page() {
     }
   }
 
+  function updateChatMessage(messageId, updater) {
+    setMessages((current) =>
+      current.map((message) => (message.id === messageId ? { ...message, ...updater(message) } : message))
+    );
+  }
+
+  async function handleCopilotExecutionAction(messageId, action, tickerOverride) {
+    if (action === "decline") {
+      updateChatMessage(messageId, () => ({
+        pendingExecution: null,
+        approvalState: "declined",
+        content: "Execution was declined. The trade was not submitted.",
+      }));
+      pushToast(`Declined execution for ${tickerOverride || workflowState?.ticker || "the pending trade"}.`);
+      return;
+    }
+
+    updateChatMessage(messageId, () => ({
+      pendingExecution: {
+        ticker: tickerOverride,
+        busy: true,
+      },
+      approvalState: "submitting",
+    }));
+
+    try {
+      const state = await runSingleWorkflow({
+        tickerOverride,
+        confirmExecution: true,
+        shouldAutoExecute: false,
+      });
+      applyWorkflowResultToWorkspace(state, {
+        queueLength: 1,
+        queueIndex: 0,
+        confirmExecution: true,
+        shouldAutoExecute: false,
+        announceInChat: false,
+        showToast: true,
+      });
+      updateChatMessage(messageId, () => ({
+        pendingExecution: null,
+        approvalState: "approved",
+        content:
+          state.execution_status === "SUBMITTED"
+            ? `Execution approved. The ${state.ticker} order was submitted.`
+            : `Execution approval was processed for ${state.ticker}, but the order was not submitted.`,
+      }));
+      if (token) {
+        const historyResponse = await apiFetch("/api/history");
+        if (historyResponse.ok) {
+          setRunHistory(await historyResponse.json());
+        }
+      }
+    } catch (error) {
+      updateChatMessage(messageId, (message) => ({
+        pendingExecution: message.pendingExecution ? { ...message.pendingExecution, busy: false } : null,
+        approvalState: "idle",
+        content: `Execution is still pending. ${humanizeFetchError(error)}`,
+      }));
+      pushToast(`Execution approval failed: ${humanizeFetchError(error)}`);
+    }
+  }
+
   async function runPlatform(confirmExecution = false) {
     const batchTickers = parseTickerBatch(ticker);
     const fallbackTicker = ticker.trim().toUpperCase();
@@ -1151,7 +1222,7 @@ export default function Page() {
       return;
     }
 
-    setMessages((current) => [...current, { role: "user", content: message }]);
+    setMessages((current) => [...current, createChatMessage("user", message)]);
     setCopilotInput("");
     setCopilotPending(true);
     setCopilotThinking([]);
@@ -1213,12 +1284,20 @@ export default function Page() {
 
           if (event.type === "complete") {
             setCopilotModel(event.model || "--");
+            const awaitingApproval =
+              event.action_result?.execution_status === "AWAITING_CONFIRMATION" &&
+              event.action_result?.ticker;
             setMessages((current) => [
               ...current,
-              {
-                role: "assistant",
-                content: finalReply || "I finished processing your request.",
-              },
+              createChatMessage("assistant", finalReply || "I finished processing your request.", awaitingApproval
+                ? {
+                    pendingExecution: {
+                      ticker: event.action_result.ticker,
+                      busy: false,
+                    },
+                    approvalState: "idle",
+                  }
+                : {}),
             ]);
             if (copilotStreamTimeoutRef.current) {
               window.clearTimeout(copilotStreamTimeoutRef.current);
@@ -1229,7 +1308,10 @@ export default function Page() {
               setShowCopilotStreamBox(false);
               copilotStreamTimeoutRef.current = null;
             }, 2000);
-            if (event.action_result?.ticker && event.action_result?.signal) {
+            if (
+              event.action_result?.ticker &&
+              (event.action_result?.signal || event.action_result?.scanner_summary || event.action_result?.market_data)
+            ) {
               applyWorkflowResultToWorkspace(event.action_result, {
                 queueLength: 1,
                 queueIndex: 0,
@@ -1263,7 +1345,7 @@ export default function Page() {
       setShowCopilotStreamBox(false);
       setMessages((current) => [
         ...current,
-        { role: "assistant", content: `I could not answer that just now: ${error.message}` },
+        createChatMessage("assistant", `I could not answer that just now: ${error.message}`),
       ]);
     } finally {
       setCopilotPending(false);
@@ -1744,9 +1826,29 @@ export default function Page() {
             </div>
             <div className="copilot-messages" ref={copilotMessagesRef}>
               {messages.map((message, index) => (
-                <div className={`copilot-message-row ${message.role}`} key={`${message.role}-${index}`}>
+                <div className={`copilot-message-row ${message.role}`} key={message.id || `${message.role}-${index}`}>
                   <div className={`copilot-message ${message.role}`}>
                     {message.content}
+                    {message.pendingExecution ? (
+                      <div className="copilot-approval-actions">
+                        <button
+                          type="button"
+                          className="copilot-approval-button approve"
+                          disabled={message.pendingExecution.busy}
+                          onClick={() => handleCopilotExecutionAction(message.id, "approve", message.pendingExecution.ticker)}
+                        >
+                          {message.pendingExecution.busy ? "Submitting..." : "Approve"}
+                        </button>
+                        <button
+                          type="button"
+                          className="copilot-approval-button decline"
+                          disabled={message.pendingExecution.busy}
+                          onClick={() => handleCopilotExecutionAction(message.id, "decline", message.pendingExecution.ticker)}
+                        >
+                          Decline
+                        </button>
+                      </div>
+                    ) : null}
                   </div>
                 </div>
               ))}

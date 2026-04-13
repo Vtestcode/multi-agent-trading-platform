@@ -402,7 +402,9 @@ async def copilot_chat(
         workflow_state = history_states[0]
     copilot_result = await app.state.copilot.answer(payload.message, workflow_state, db=db, current_user=current_user)
     action_result = copilot_result.get("action_result")
-    if isinstance(action_result, dict) and action_result.get("ticker") and action_result.get("signal"):
+    if isinstance(action_result, dict) and action_result.get("ticker") and (
+        action_result.get("signal") or action_result.get("scanner_summary") or action_result.get("market_data")
+    ):
         app.state.last_workflow_state = action_result
         if current_user and copilot_result.get("action_taken") in {"run_workflow", "execute_trade"}:
             run_record = create_workflow_run(db, current_user, action_result)
@@ -444,7 +446,9 @@ async def copilot_chat_stream(
                     emit=emit,
                 )
                 action_result = copilot_result.get("action_result")
-                if isinstance(action_result, dict) and action_result.get("ticker") and action_result.get("signal"):
+                if isinstance(action_result, dict) and action_result.get("ticker") and (
+                    action_result.get("signal") or action_result.get("scanner_summary") or action_result.get("market_data")
+                ):
                     app.state.last_workflow_state = action_result
                     if current_user and copilot_result.get("action_taken") in {"run_workflow", "execute_trade"}:
                         run_record = create_workflow_run(db, current_user, action_result)

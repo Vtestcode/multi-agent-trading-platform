@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 from agents.coordinator_agent import CoordinatorAgent
 from agents.llm_common import compact_json, resolve_model_name
 from agents.tool_registry import ToolRegistryError, TradingToolRegistry
-from history_store import list_workflow_run_states, summarize_workflow_runs
+from history_store import has_pending_execution_approval, list_workflow_run_states, summarize_workflow_runs
 from integrations import get_broker_connection, resolve_execution_credentials
 from models import User
 
@@ -160,6 +160,7 @@ class CopilotAgent:
             history=history,
         )
         plan = (await self.planner.run(planner_prompt)).output
+        plan = self._apply_plan_overrides(plan, question, interpretation)
         await self._emit(
             emit,
             {
@@ -331,18 +332,30 @@ class CopilotAgent:
             ticker = (plan.ticker or interpretation.requested_ticker or self._extract_ticker(question) or "").strip().upper()
             if not ticker:
                 return {"error": "No ticker was provided for trade execution."}
+            allow_execution = self._is_execution_confirmation_request(question)
+            if allow_execution and not has_pending_execution_approval(db, current_user, ticker):
+                return {
+                    "error": (
+                        f"There is no pending execution approval for {ticker}. "
+                        "Run the trade analysis first, then approve the pending execution."
+                    )
+                }
             await self._emit(
                 emit,
                 {
                     "type": "status",
                     "stage": "action",
-                    "message": f"Running the execution-ready workflow for {ticker} and checking whether submission can proceed.",
+                    "message": (
+                        f"Submitting the approved trade for {ticker}."
+                        if allow_execution
+                        else f"Running the execution-ready workflow for {ticker} and checking whether submission can proceed."
+                    ),
                 },
             )
             final_state = await self._run_workflow(
                 ticker=ticker,
                 broker_connection=broker_connection,
-                allow_execution=False,
+                allow_execution=allow_execution,
             )
             return final_state
         return {"error": f"Unsupported action: {plan.action}"}
@@ -459,7 +472,10 @@ class CopilotAgent:
         result = await self.responder.run(prompt)
         answer = result.output
         if action_result is not None:
-            answer.action_result = self._preview_any(action_result)
+            if self._is_workspace_result(action_result):
+                answer.action_result = action_result
+            else:
+                answer.action_result = self._preview_any(action_result)
         if not answer.action_taken:
             answer.action_taken = plan.action
         return answer
@@ -480,6 +496,104 @@ class CopilotAgent:
         if not context_bits:
             return "Reviewing your request with the currently available workspace context."
         return "Reviewing your request against " + ", ".join(context_bits) + "."
+
+    def _apply_plan_overrides(
+        self,
+        plan: CopilotPlan,
+        question: str,
+        interpretation: QueryInterpretation,
+    ) -> CopilotPlan:
+        text = f"{question} {interpretation.normalized_query}".lower()
+        ticker = (plan.ticker or interpretation.requested_ticker or self._extract_ticker(question) or "").strip().upper() or None
+
+        if self._is_scan_request(text):
+            plan.action = "scan_market"
+            plan.ticker = None
+            plan.tool_name = None
+            plan.parameters = {}
+            plan.requires_broker = False
+            if "scan" not in plan.rationale.lower():
+                plan.rationale = "The operator explicitly asked to run a new market scan."
+            return plan
+
+        if self._is_execution_request(text, ticker):
+            plan.action = "execute_trade"
+            plan.ticker = ticker
+            plan.tool_name = None
+            plan.parameters = {}
+            plan.requires_broker = True
+            if self._is_execution_confirmation_request(text):
+                plan.rationale = "The operator explicitly asked to approve or confirm the pending trade."
+            elif "execute" not in plan.rationale.lower() and "trade" not in plan.rationale.lower():
+                plan.rationale = "The operator explicitly asked to place or execute a trade."
+            return plan
+
+        if self._is_workflow_request(text, ticker):
+            plan.action = "run_workflow"
+            plan.ticker = ticker
+            plan.tool_name = None
+            plan.parameters = {}
+            plan.requires_broker = False
+            if "workflow" not in plan.rationale.lower() and "run" not in plan.rationale.lower():
+                plan.rationale = "The operator explicitly asked to run platform analysis for a ticker."
+            return plan
+
+        return plan
+
+    @staticmethod
+    def _is_scan_request(text: str) -> bool:
+        scan_phrases = (
+            "run new scan",
+            "run a new scan",
+            "start new scan",
+            "scan the market",
+            "run scan",
+            "start scan",
+            "new scan",
+            "find candidates",
+            "scan for setups",
+        )
+        return any(phrase in text for phrase in scan_phrases)
+
+    @staticmethod
+    def _is_workflow_request(text: str, ticker: str | None) -> bool:
+        if not ticker:
+            return False
+        workflow_phrases = (
+            "run ",
+            "analyze ",
+            "analyse ",
+            "check ",
+            "review ",
+        )
+        return any(phrase in text for phrase in workflow_phrases)
+
+    @staticmethod
+    def _is_execution_request(text: str, ticker: str | None) -> bool:
+        if not ticker:
+            return False
+        execution_phrases = (
+            "buy ",
+            "place order",
+            "place the order",
+            "execute ",
+            "submit ",
+            "approve ",
+            "confirm ",
+            "proceed ",
+        )
+        return any(phrase in text for phrase in execution_phrases)
+
+    @staticmethod
+    def _is_execution_confirmation_request(text: str) -> bool:
+        confirmation_phrases = (
+            "approve ",
+            "confirm ",
+            "proceed ",
+            "submit the order",
+            "place the order",
+        )
+        return any(phrase in text for phrase in confirmation_phrases)
 
     @staticmethod
     async def _emit(emit: EventEmitter | None, event: dict[str, Any]) -> None:
@@ -552,3 +666,11 @@ class CopilotAgent:
         if isinstance(value, list):
             return value[:6]
         return str(value)
+
+    @staticmethod
+    def _is_workspace_result(value: Any) -> bool:
+        return isinstance(value, dict) and bool(value.get("ticker")) and (
+            value.get("signal") is not None
+            or value.get("scanner_summary") is not None
+            or value.get("market_data") is not None
+        )
