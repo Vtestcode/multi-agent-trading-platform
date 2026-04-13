@@ -1411,11 +1411,24 @@ textarea {
   margin-bottom: 12px;
 }
 
-.copilot-message {
+.copilot-message-row {
+  display: flex;
   width: 100%;
-  max-width: 100%;
+}
+
+.copilot-message-row.user {
+  justify-content: flex-start;
+}
+
+.copilot-message-row.assistant {
+  justify-content: flex-end;
+}
+
+.copilot-message {
+  width: fit-content;
+  max-width: 86%;
   padding: 12px 13px;
-  border-radius: 14px;
+  border-radius: 18px;
   line-height: 1.5;
   border: 1px solid rgba(101, 116, 146, 0.2);
   background: rgba(18, 22, 29, 0.7);
@@ -1425,19 +1438,53 @@ textarea {
 }
 
 .copilot-message.user {
-  background: rgba(55, 105, 182, 0.2);
-  color: #d6e8ff;
+  background: rgba(34, 48, 74, 0.92);
+  border-color: rgba(87, 123, 182, 0.35);
+  color: #e2ecff;
+  border-bottom-left-radius: 8px;
 }
 
-.copilot-message.thinking {
-  background: rgba(36, 45, 60, 0.78);
-  border-style: dashed;
-  color: #b9c7dc;
-  font-size: 0.94rem;
+.copilot-message.assistant {
+  background: rgba(17, 20, 27, 0.96);
+  border-color: rgba(101, 116, 146, 0.18);
+  color: #f0f5ff;
+  border-bottom-right-radius: 8px;
 }
 
-.copilot-message.stream-reply {
-  background: rgba(18, 22, 29, 0.86);
+.copilot-stream-box {
+  display: grid;
+  gap: 10px;
+  margin: 0 0 12px;
+  padding: 12px;
+  border-radius: 16px;
+  border: 1px dashed rgba(121, 146, 188, 0.34);
+  background: linear-gradient(180deg, rgba(26, 31, 41, 0.96), rgba(20, 24, 33, 0.96));
+}
+
+.copilot-stream-title {
+  margin: 0;
+  font-size: 0.78rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #91a6c9;
+}
+
+.copilot-stream-log {
+  display: grid;
+  gap: 8px;
+}
+
+.copilot-stream-step {
+  color: #c5d1e5;
+  font-size: 0.93rem;
+  line-height: 1.45;
+}
+
+.copilot-stream-reply {
+  padding-top: 4px;
+  border-top: 1px solid rgba(121, 146, 188, 0.16);
+  color: #eef4ff;
+  line-height: 1.55;
 }
 
 .copilot-compose {

@@ -566,6 +566,8 @@ export default function Page() {
   const [copilotPending, setCopilotPending] = useState(false);
   const [copilotInput, setCopilotInput] = useState("");
   const [copilotModel, setCopilotModel] = useState("--");
+  const [copilotThinking, setCopilotThinking] = useState([]);
+  const [copilotStreamingReply, setCopilotStreamingReply] = useState("");
   const [toast, setToast] = useState("");
   const [messages, setMessages] = useState([
     {
@@ -1087,6 +1089,8 @@ export default function Page() {
     setMessages((current) => [...current, { role: "user", content: message }]);
     setCopilotInput("");
     setCopilotPending(true);
+    setCopilotThinking([]);
+    setCopilotStreamingReply("");
 
     try {
       const response = await apiFetch("/api/copilot/stream", {
@@ -1103,6 +1107,7 @@ export default function Page() {
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
       let buffer = "";
+      let finalReply = "";
 
       while (true) {
         const { value, done } = await reader.read();
@@ -1121,24 +1126,13 @@ export default function Page() {
           const event = JSON.parse(trimmed);
 
           if (event.type === "status") {
-            setMessages((current) => [
-              ...current,
-              { role: "assistant", variant: "thinking", content: `Thinking: ${event.message}` },
-            ]);
+            setCopilotThinking((current) => [...current, event.message]);
             continue;
           }
 
           if (event.type === "reply_chunk") {
-            setMessages((current) => {
-              const next = [...current];
-              const last = next[next.length - 1];
-              if (last?.variant === "stream-reply") {
-                last.content = `${last.content} ${event.content}`.trim();
-                return next;
-              }
-              next.push({ role: "assistant", variant: "stream-reply", content: event.content });
-              return next;
-            });
+            finalReply = `${finalReply} ${event.content}`.trim();
+            setCopilotStreamingReply(finalReply);
             continue;
           }
 
@@ -1149,6 +1143,15 @@ export default function Page() {
 
           if (event.type === "complete") {
             setCopilotModel(event.model || "--");
+            setMessages((current) => [
+              ...current,
+              {
+                role: "assistant",
+                content: finalReply || "I finished processing your request.",
+              },
+            ]);
+            setCopilotThinking([]);
+            setCopilotStreamingReply("");
             if (event.action_result?.ticker && event.action_result?.signal) {
               setWorkflowState(event.action_result);
             }
@@ -1167,6 +1170,8 @@ export default function Page() {
         }
       }
     } catch (error) {
+      setCopilotThinking([]);
+      setCopilotStreamingReply("");
       setMessages((current) => [
         ...current,
         { role: "assistant", content: `I could not answer that just now: ${error.message}` },
@@ -1650,11 +1655,30 @@ export default function Page() {
             </div>
             <div className="copilot-messages">
               {messages.map((message, index) => (
-                <div className={`copilot-message ${message.role} ${message.variant || ""}`.trim()} key={`${message.role}-${index}`}>
-                  {message.content}
+                <div className={`copilot-message-row ${message.role}`} key={`${message.role}-${index}`}>
+                  <div className={`copilot-message ${message.role}`}>
+                    {message.content}
+                  </div>
                 </div>
               ))}
             </div>
+            {copilotPending && (copilotThinking.length || copilotStreamingReply) ? (
+              <div className="copilot-stream-box">
+                <p className="copilot-stream-title">Assistant is working</p>
+                {copilotThinking.length ? (
+                  <div className="copilot-stream-log">
+                    {copilotThinking.map((entry, index) => (
+                      <div className="copilot-stream-step" key={`${entry}-${index}`}>
+                        {entry}
+                      </div>
+                    ))}
+                  </div>
+                ) : null}
+                {copilotStreamingReply ? (
+                  <div className="copilot-stream-reply">{copilotStreamingReply}</div>
+                ) : null}
+              </div>
+            ) : null}
             <div className="copilot-compose">
               <textarea
                 rows={4}
