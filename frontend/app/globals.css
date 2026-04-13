@@ -1417,11 +1417,11 @@ textarea {
 }
 
 .copilot-message-row.user {
-  justify-content: flex-start;
+  justify-content: flex-end;
 }
 
 .copilot-message-row.assistant {
-  justify-content: flex-end;
+  justify-content: flex-start;
 }
 
 .copilot-message {
@@ -1441,14 +1441,14 @@ textarea {
   background: rgba(34, 48, 74, 0.92);
   border-color: rgba(87, 123, 182, 0.35);
   color: #e2ecff;
-  border-bottom-left-radius: 8px;
+  border-bottom-right-radius: 8px;
 }
 
 .copilot-message.assistant {
   background: rgba(17, 20, 27, 0.96);
   border-color: rgba(101, 116, 146, 0.18);
   color: #f0f5ff;
-  border-bottom-right-radius: 8px;
+  border-bottom-left-radius: 8px;
 }
 
 .copilot-stream-box {

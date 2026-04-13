@@ -1686,7 +1686,10 @@ export default function Page() {
                 placeholder="Scan for setups, compare my last runs, or buy AAPL if risk approves"
                 onChange={(event) => setCopilotInput(event.target.value)}
                 onKeyDown={(event) => {
-                  if ((event.ctrlKey || event.metaKey) && event.key === "Enter") askCopilot();
+                  if (event.key === "Enter" && !event.shiftKey) {
+                    event.preventDefault();
+                    askCopilot();
+                  }
                 }}
               />
               <button type="button" onClick={askCopilot} disabled={copilotPending}>
