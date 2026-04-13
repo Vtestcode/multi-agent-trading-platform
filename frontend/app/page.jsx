@@ -1356,12 +1356,17 @@ export default function Page() {
                       : "Sign in and connect a broker to enable auto execution."}
                   </small>
                 </span>
-                <input
-                  type="checkbox"
-                  checked={autoExecutionEnabled}
-                  disabled={!canEnableAutoExecution || runPending || isRunTransitionPending}
-                  onChange={(event) => setAutoExecutionEnabled(event.target.checked)}
-                />
+                <span className="execution-switch">
+                  <input
+                    type="checkbox"
+                    checked={autoExecutionEnabled}
+                    disabled={!canEnableAutoExecution || runPending || isRunTransitionPending}
+                    onChange={(event) => setAutoExecutionEnabled(event.target.checked)}
+                  />
+                  <span className="execution-switch-track" aria-hidden="true">
+                    <span className="execution-switch-thumb" />
+                  </span>
+                </span>
               </label>
               <label className="execution-repeat-row">
                 <span>
