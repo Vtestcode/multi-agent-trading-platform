@@ -1089,16 +1089,83 @@ export default function Page() {
     setCopilotPending(true);
 
     try {
-      const response = await apiFetch("/api/copilot", {
+      const response = await apiFetch("/api/copilot/stream", {
         method: "POST",
         body: JSON.stringify({ message }),
       });
       if (!response.ok) {
         throw new Error((await response.text()) || "copilot request failed");
       }
-      const payload = await response.json();
-      setCopilotModel(payload.model || "--");
-      setMessages((current) => [...current, { role: "assistant", content: payload.reply }]);
+      if (!response.body) {
+        throw new Error("Copilot stream did not return a readable response.");
+      }
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) {
+          break;
+        }
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() || "";
+
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed) {
+            continue;
+          }
+          const event = JSON.parse(trimmed);
+
+          if (event.type === "status") {
+            setMessages((current) => [
+              ...current,
+              { role: "assistant", variant: "thinking", content: `Thinking: ${event.message}` },
+            ]);
+            continue;
+          }
+
+          if (event.type === "reply_chunk") {
+            setMessages((current) => {
+              const next = [...current];
+              const last = next[next.length - 1];
+              if (last?.variant === "stream-reply") {
+                last.content = `${last.content} ${event.content}`.trim();
+                return next;
+              }
+              next.push({ role: "assistant", variant: "stream-reply", content: event.content });
+              return next;
+            });
+            continue;
+          }
+
+          if (event.type === "result") {
+            setCopilotModel(event.model || "--");
+            continue;
+          }
+
+          if (event.type === "complete") {
+            setCopilotModel(event.model || "--");
+            if (event.action_result?.ticker && event.action_result?.signal) {
+              setWorkflowState(event.action_result);
+            }
+            if (token && event.action_result?.history_id) {
+              const historyResponse = await apiFetch("/api/history");
+              if (historyResponse.ok) {
+                setRunHistory(await historyResponse.json());
+              }
+            }
+            continue;
+          }
+
+          if (event.type === "error") {
+            throw new Error(event.message || "copilot request failed");
+          }
+        }
+      }
     } catch (error) {
       setMessages((current) => [
         ...current,
@@ -1583,7 +1650,7 @@ export default function Page() {
             </div>
             <div className="copilot-messages">
               {messages.map((message, index) => (
-                <div className={`copilot-message ${message.role}`} key={`${message.role}-${index}`}>
+                <div className={`copilot-message ${message.role} ${message.variant || ""}`.trim()} key={`${message.role}-${index}`}>
                   {message.content}
                 </div>
               ))}

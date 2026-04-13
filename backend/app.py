@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import json
 import os
 import sys
 import logging
@@ -13,6 +15,7 @@ from pydantic import BaseModel, Field
 from langsmith import traceable
 from langsmith.middleware import TracingMiddleware
 from sqlalchemy.orm import Session
+from starlette.responses import StreamingResponse
 
 BACKEND_DIR = Path(__file__).resolve().parent
 if str(BACKEND_DIR) not in sys.path:
@@ -123,6 +126,10 @@ class CopilotResponse(BaseModel):
     has_workflow_state: bool
     action_taken: str | None = None
     action_result: dict | list | str | None = None
+
+
+def _stream_event(payload: dict) -> str:
+    return json.dumps(payload, default=str) + "\n"
 
 
 class RegisterRequest(BaseModel):
@@ -407,6 +414,68 @@ async def copilot_chat(
         action_taken=copilot_result.get("action_taken"),
         action_result=action_result,
     )
+
+
+@app.post("/api/copilot/stream")
+@traceable(name="api_copilot_chat_stream")
+async def copilot_chat_stream(
+    payload: CopilotRequest,
+    current_user: User | None = Depends(get_optional_user),
+    db: Session = Depends(get_db),
+) -> StreamingResponse:
+    workflow_state = app.state.last_workflow_state
+    history_states = list_workflow_run_states(db, current_user, limit=8) if current_user else []
+    if workflow_state is None and history_states:
+        workflow_state = history_states[0]
+
+    async def event_generator():
+        queue: asyncio.Queue[dict | None] = asyncio.Queue()
+
+        async def emit(event: dict) -> None:
+            await queue.put(event)
+
+        async def run_copilot() -> None:
+            try:
+                copilot_result = await app.state.copilot.stream_answer(
+                    payload.message,
+                    workflow_state,
+                    db=db,
+                    current_user=current_user,
+                    emit=emit,
+                )
+                action_result = copilot_result.get("action_result")
+                if isinstance(action_result, dict) and action_result.get("ticker") and action_result.get("signal"):
+                    app.state.last_workflow_state = action_result
+                    if current_user and copilot_result.get("action_taken") in {"run_workflow", "execute_trade"}:
+                        run_record = create_workflow_run(db, current_user, action_result)
+                        action_result["history_id"] = run_record.id
+                await queue.put(
+                    {
+                        "type": "complete",
+                        "model": app.state.copilot.model_name,
+                        "has_workflow_state": workflow_state is not None or bool(history_states),
+                        "action_taken": copilot_result.get("action_taken"),
+                        "action_result": action_result,
+                    }
+                )
+            except Exception as exc:
+                logger.exception("Copilot streaming request failed")
+                await queue.put({"type": "error", "message": str(exc) or "Copilot request failed."})
+            finally:
+                await queue.put(None)
+
+        producer = asyncio.create_task(run_copilot())
+        try:
+            while True:
+                event = await queue.get()
+                if event is None:
+                    break
+                yield _stream_event(event)
+        finally:
+            if not producer.done():
+                producer.cancel()
+
+    return StreamingResponse(event_generator(), media_type="application/x-ndjson")
 
 
 @app.get("/")

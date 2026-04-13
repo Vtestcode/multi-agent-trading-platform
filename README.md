@@ -6,6 +6,8 @@ Backend is handled by LangGraph orchestration, PydanticAI decision agents, marke
 
 The workflow includes a stateful coordinator agent that maintains shared workflow state, delegates work to specialist agents, records tool usage, and runs validation loops over strategy, risk, and execution outputs before the run is finalized.
 
+The copilot now includes a live reasoning stream in the UI: users can watch staged planning and action logs as the copilot reviews context, chooses an action, calls tools or workflows, and streams back its final response.
+
 ## Local Development
 clone or download
 
@@ -74,6 +76,7 @@ NEXT_PUBLIC_API_BASE_URL=http://127.0.0.1:8000
 NEXT_PUBLIC_GOOGLE_CLIENT_ID=your_google_oauth_client_id.apps.googleusercontent.com
 ```
 
+
 ## LangSmith Observability (Optional)
 - LangSmith tracing can be enabled entirely through backend environment variables.
 - LangGraph workflow runs, API endpoints, and PydanticAI agent calls are prepared for LangSmith tracing.
@@ -93,6 +96,7 @@ NEXT_PUBLIC_GOOGLE_CLIENT_ID=your_google_oauth_client_id.apps.googleusercontent.
 - Execution defaults to direct Alpaca paper-trading REST using the signed-in user's own Alpaca connection for deployment reliability.
 - The copilot explains the latest run and helps operators understand next steps.
 - The copilot can now inspect saved run history, use the tool registry, launch scans and workflow runs, and attempt execution actions when the user is authenticated with a connected Alpaca account.
+- The ai copilot now streams visible reasoning updates in the workspace so users can see what it is checking before the final answer appears.
 
 ## Tool Catalog
 - Market Data: `get_stock_bars`, `get_latest_quote`, `get_most_actives`, `check_market_clock`, `get_stock_news`

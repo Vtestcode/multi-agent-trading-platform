@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import re
+from collections.abc import Awaitable, Callable
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field
@@ -32,6 +33,9 @@ class CopilotAnswer(BaseModel):
     reply: str
     action_taken: str
     action_result: dict[str, Any] | list[Any] | str | None = None
+
+
+EventEmitter = Callable[[dict[str, Any]], Awaitable[None] | None]
 
 
 class CopilotAgent:
@@ -76,11 +80,72 @@ class CopilotAgent:
         db: Session | None = None,
         current_user: User | None = None,
     ) -> dict[str, Any]:
+        return await self._run(question, workflow_state, db=db, current_user=current_user)
+
+    async def stream_answer(
+        self,
+        question: str,
+        workflow_state: dict[str, Any] | None,
+        db: Session | None = None,
+        current_user: User | None = None,
+        emit: EventEmitter | None = None,
+    ) -> dict[str, Any]:
+        return await self._run(question, workflow_state, db=db, current_user=current_user, emit=emit)
+
+    async def _run(
+        self,
+        question: str,
+        workflow_state: dict[str, Any] | None,
+        db: Session | None = None,
+        current_user: User | None = None,
+        emit: EventEmitter | None = None,
+    ) -> dict[str, Any]:
         history = list_workflow_run_states(db, current_user, limit=8) if db and current_user else []
+        await self._emit(
+            emit,
+            {
+                "type": "status",
+                "stage": "context",
+                "message": (
+                    "Reviewing your request, the latest workspace state, and recent run history."
+                    if history or workflow_state
+                    else "Reviewing your request with the currently available workspace context."
+                ),
+            },
+        )
         planner_prompt = self._build_planner_prompt(question=question, workflow_state=workflow_state, history=history)
         plan = (await self.planner.run(planner_prompt)).output
-        action_result = await self._execute_plan(plan, question, workflow_state, history, db, current_user)
-        reply = await self._compose_answer(question, workflow_state, history, plan, action_result)
+        await self._emit(
+            emit,
+            {
+                "type": "status",
+                "stage": "planning",
+                "message": f"Selected next step: {plan.action}. {plan.rationale}",
+            },
+        )
+        action_result = await self._execute_plan(plan, question, workflow_state, history, db, current_user, emit=emit)
+        reply = await self._compose_answer(question, workflow_state, history, plan, action_result, emit=emit)
+        for chunk in self._reply_chunks(reply.reply):
+            await self._emit(
+                emit,
+                {
+                    "type": "reply_chunk",
+                    "stage": "final",
+                    "content": chunk,
+                },
+            )
+        await self._emit(
+            emit,
+            {
+                "type": "result",
+                "stage": "final",
+                "message": "Copilot response ready.",
+                "reply": reply.reply,
+                "action_taken": reply.action_taken,
+                "action_result": reply.action_result,
+                "model": self.model_name,
+            },
+        )
         return {
             "reply": reply.reply,
             "action_taken": reply.action_taken,
@@ -109,16 +174,41 @@ class CopilotAgent:
         history: list[dict[str, Any]],
         db: Session | None,
         current_user: User | None,
+        emit: EventEmitter | None = None,
     ) -> Any:
         logger.info("[CopilotAgent] action=%s rationale=%s", plan.action, plan.rationale)
         if plan.action == "answer":
+            await self._emit(
+                emit,
+                {
+                    "type": "status",
+                    "stage": "action",
+                    "message": "No platform action needed. Drafting a direct answer.",
+                },
+            )
             return None
         if plan.action == "history_lookup":
+            await self._emit(
+                emit,
+                {
+                    "type": "status",
+                    "stage": "action",
+                    "message": f"Checking recent saved runs across {len(history)} history items.",
+                },
+            )
             return {
                 "history_summary": summarize_workflow_runs(history),
                 "history_count": len(history),
             }
         if plan.action == "scan_market":
+            await self._emit(
+                emit,
+                {
+                    "type": "status",
+                    "stage": "action",
+                    "message": "Launching a fresh market scan from the coordinator.",
+                },
+            )
             state = self.coordinator.initialize_state(
                 {
                     "manual_ticker": None,
@@ -128,6 +218,14 @@ class CopilotAgent:
             return await self.coordinator.run_scanner(state)
         if plan.action == "run_workflow":
             ticker = (plan.ticker or self._extract_ticker(question) or "").strip().upper() or None
+            await self._emit(
+                emit,
+                {
+                    "type": "status",
+                    "stage": "action",
+                    "message": f"Running the trading workflow for {ticker or 'an auto-selected candidate'}.",
+                },
+            )
             broker_connection = self._resolve_broker(db, current_user) if plan.requires_broker else None
             final_state = await self._run_workflow(
                 ticker=ticker,
@@ -148,6 +246,14 @@ class CopilotAgent:
                 if broker_connection is None:
                     return {"error": "A connected Alpaca account is required for this action."}
                 params.setdefault("broker_connection", broker_connection)
+            await self._emit(
+                emit,
+                {
+                    "type": "status",
+                    "stage": "action",
+                    "message": f"Calling tool {tool_name} with the most relevant inferred parameters.",
+                },
+            )
             try:
                 return await self.tool_registry.call_tool(tool_name, **params)
             except ToolRegistryError as exc:
@@ -159,6 +265,14 @@ class CopilotAgent:
             ticker = (plan.ticker or self._extract_ticker(question) or "").strip().upper()
             if not ticker:
                 return {"error": "No ticker was provided for trade execution."}
+            await self._emit(
+                emit,
+                {
+                    "type": "status",
+                    "stage": "action",
+                    "message": f"Running the execution-ready workflow for {ticker} and checking whether submission can proceed.",
+                },
+            )
             final_state = await self._run_workflow(
                 ticker=ticker,
                 broker_connection=broker_connection,
@@ -174,7 +288,16 @@ class CopilotAgent:
         history: list[dict[str, Any]],
         plan: CopilotPlan,
         action_result: dict[str, Any] | None,
+        emit: EventEmitter | None = None,
     ) -> CopilotAnswer:
+        await self._emit(
+            emit,
+            {
+                "type": "status",
+                "stage": "response",
+                "message": "Summarizing the result into an operator-facing reply.",
+            },
+        )
         prompt = (
             "Answer the operator's request using the available platform context.\n\n"
             f"Operator question:\n{question.strip()}\n\n"
@@ -197,6 +320,19 @@ class CopilotAgent:
         if not answer.action_taken:
             answer.action_taken = plan.action
         return answer
+
+    @staticmethod
+    async def _emit(emit: EventEmitter | None, event: dict[str, Any]) -> None:
+        if emit is None:
+            return
+        maybe_awaitable = emit(event)
+        if maybe_awaitable is not None:
+            await maybe_awaitable
+
+    @staticmethod
+    def _reply_chunks(reply: str) -> list[str]:
+        parts = [part.strip() for part in re.split(r"(?<=[.!?])\s+", reply.strip()) if part.strip()]
+        return parts or ([reply.strip()] if reply.strip() else [])
 
     async def _run_workflow(
         self,

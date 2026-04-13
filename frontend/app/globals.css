@@ -1429,6 +1429,17 @@ textarea {
   color: #d6e8ff;
 }
 
+.copilot-message.thinking {
+  background: rgba(36, 45, 60, 0.78);
+  border-style: dashed;
+  color: #b9c7dc;
+  font-size: 0.94rem;
+}
+
+.copilot-message.stream-reply {
+  background: rgba(18, 22, 29, 0.86);
+}
+
 .copilot-compose {
   display: grid;
   gap: 10px;
