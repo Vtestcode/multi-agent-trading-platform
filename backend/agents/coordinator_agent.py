@@ -5,6 +5,7 @@ from typing import Any
 
 from agents.execution_agent import ExecutionAgent
 from agents.market_data_agent import MarketDataAgent
+from agents.research_agent import ResearchAgent
 from agents.risk_agent import RiskAgent
 from agents.scanner_agent import MarketScannerAgent
 from agents.strategy_agent import StrategyAgent
@@ -22,6 +23,7 @@ class CoordinatorAgent:
         tool_registry: TradingToolRegistry | None = None,
         market_data_agent: MarketDataAgent | None = None,
         scanner_agent: MarketScannerAgent | None = None,
+        research_agent: ResearchAgent | None = None,
         strategy_agent: StrategyAgent | None = None,
         risk_agent: RiskAgent | None = None,
         execution_agent: ExecutionAgent | None = None,
@@ -30,6 +32,7 @@ class CoordinatorAgent:
         self.tool_registry = tool_registry or TradingToolRegistry()
         self.market_data_agent = market_data_agent or MarketDataAgent()
         self.scanner_agent = scanner_agent or MarketScannerAgent(market_data_agent=self.market_data_agent)
+        self.research_agent = research_agent or ResearchAgent(tool_registry=self.tool_registry)
         self.strategy_agent = strategy_agent or StrategyAgent(tool_registry=self.tool_registry)
         self.risk_agent = risk_agent or RiskAgent(tool_registry=self.tool_registry)
         self.execution_agent = execution_agent or ExecutionAgent(tool_registry=self.tool_registry)
@@ -66,6 +69,12 @@ class CoordinatorAgent:
         ticker = state["ticker"]
         self._trace(state, f"Coordinator delegated strategy step for {ticker}")
         result = await self.strategy_agent.run(state)
+        return {**result, **self._state_metadata(state)}
+
+    async def run_research(self, state: TradingState) -> dict[str, Any]:
+        ticker = state["ticker"]
+        self._trace(state, f"Coordinator delegated research step for {ticker}")
+        result = await self.research_agent.run(state)
         return {**result, **self._state_metadata(state)}
 
     async def validate_strategy(self, state: TradingState) -> dict[str, Any]:

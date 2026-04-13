@@ -557,6 +557,7 @@ export default function Page() {
   const apiBaseCandidates = useMemo(() => getApiBaseCandidates(apiBaseUrl), [apiBaseUrl]);
   const googleClientId = process.env.NEXT_PUBLIC_GOOGLE_CLIENT_ID || "";
   const googleButtonRef = useRef(null);
+  const copilotMessagesRef = useRef(null);
 
   const [ticker, setTicker] = useState("");
   const [health, setHealth] = useState("Checking platform health...");
@@ -568,6 +569,7 @@ export default function Page() {
   const [copilotModel, setCopilotModel] = useState("--");
   const [copilotThinking, setCopilotThinking] = useState([]);
   const [copilotStreamingReply, setCopilotStreamingReply] = useState("");
+  const [showCopilotStreamBox, setShowCopilotStreamBox] = useState(false);
   const [toast, setToast] = useState("");
   const [messages, setMessages] = useState([
     {
@@ -597,6 +599,7 @@ export default function Page() {
   const [autoExecutionEnabled, setAutoExecutionEnabled] = useState(false);
   const [autoRunCount, setAutoRunCount] = useState(1);
   const [isRunTransitionPending, startRunTransition] = useTransition();
+  const copilotStreamTimeoutRef = useRef(null);
 
   useEffect(() => {
     const storedToken = window.localStorage.getItem(TOKEN_STORAGE_KEY);
@@ -623,6 +626,22 @@ export default function Page() {
   useEffect(() => {
     window.localStorage.setItem(AUTO_RUN_COUNT_STORAGE_KEY, String(autoRunCount));
   }, [autoRunCount]);
+
+  useEffect(() => {
+    return () => {
+      if (copilotStreamTimeoutRef.current) {
+        window.clearTimeout(copilotStreamTimeoutRef.current);
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    const container = copilotMessagesRef.current;
+    if (!container) {
+      return;
+    }
+    container.scrollTop = container.scrollHeight;
+  }, [messages, copilotThinking, copilotStreamingReply, showCopilotStreamBox, copilotPending]);
 
   useEffect(() => {
     async function loadHealth() {
@@ -932,6 +951,57 @@ export default function Page() {
     return response.json();
   }
 
+  function applyWorkflowResultToWorkspace(state, options = {}) {
+    if (!state) {
+      return;
+    }
+
+    const {
+      queueLength = 1,
+      queueIndex = 0,
+      confirmExecution = false,
+      shouldAutoExecute = false,
+      announceInChat = true,
+      showToast = false,
+    } = options;
+
+    setWorkflowState(state);
+
+    if (announceInChat) {
+      setMessages((current) => [
+        ...current,
+        {
+          role: "assistant",
+          content:
+            queueLength > 1
+              ? `Completed ${queueIndex + 1}/${queueLength}: ${state.ticker} finished with ${state.execution_status || "PENDING"}.`
+              : state.scanner_mode === "manual"
+              ? `Ran the manual override for ${state.ticker}. You can ask why the trade was approved, rejected, or what to do next.`
+              : `Scanned the market and selected ${state.ticker}. You can ask why this candidate won or what the next step should be.`,
+        },
+      ]);
+    }
+
+    if (!showToast || queueLength > 1) {
+      return;
+    }
+    if (confirmExecution && state.execution_status === "SUBMITTED") {
+      pushToast(`Execution submitted for ${state.ticker}.`);
+      return;
+    }
+    if (shouldAutoExecute && state.execution_status === "SUBMITTED") {
+      pushToast(`Auto execution submitted for ${state.ticker}.`);
+      return;
+    }
+    if (state.scanner_mode === "manual") {
+      pushToast(`Completed workflow for ${state.ticker}.`);
+      return;
+    }
+    if (state.ticker) {
+      pushToast(`Completed autonomous scan and selected ${state.ticker}.`);
+    }
+  }
+
   async function runPlatform(confirmExecution = false) {
     const batchTickers = parseTickerBatch(ticker);
     const fallbackTicker = ticker.trim().toUpperCase();
@@ -961,19 +1031,14 @@ export default function Page() {
           shouldAutoExecute,
         });
         completedStates.push(state);
-        setWorkflowState(state);
-        setMessages((current) => [
-          ...current,
-          {
-            role: "assistant",
-            content:
-              queue.length > 1
-                ? `Completed ${index + 1}/${queue.length}: ${state.ticker} finished with ${state.execution_status || "PENDING"}.`
-                : state.scanner_mode === "manual"
-                ? `Ran the manual override for ${state.ticker}. You can ask why the trade was approved, rejected, or what to do next.`
-                : `Scanned the market and selected ${state.ticker}. You can ask why this candidate won or what the next step should be.`,
-          },
-        ]);
+        applyWorkflowResultToWorkspace(state, {
+          queueLength: queue.length,
+          queueIndex: index,
+          confirmExecution,
+          shouldAutoExecute,
+          announceInChat: true,
+          showToast: false,
+        });
       }
 
       const submittedCount = completedStates.filter((state) => state.execution_status === "SUBMITTED").length;
@@ -1091,6 +1156,11 @@ export default function Page() {
     setCopilotPending(true);
     setCopilotThinking([]);
     setCopilotStreamingReply("");
+    setShowCopilotStreamBox(true);
+    if (copilotStreamTimeoutRef.current) {
+      window.clearTimeout(copilotStreamTimeoutRef.current);
+      copilotStreamTimeoutRef.current = null;
+    }
 
     try {
       const response = await apiFetch("/api/copilot/stream", {
@@ -1150,10 +1220,24 @@ export default function Page() {
                 content: finalReply || "I finished processing your request.",
               },
             ]);
-            setCopilotThinking([]);
-            setCopilotStreamingReply("");
+            if (copilotStreamTimeoutRef.current) {
+              window.clearTimeout(copilotStreamTimeoutRef.current);
+            }
+            copilotStreamTimeoutRef.current = window.setTimeout(() => {
+              setCopilotThinking([]);
+              setCopilotStreamingReply("");
+              setShowCopilotStreamBox(false);
+              copilotStreamTimeoutRef.current = null;
+            }, 2000);
             if (event.action_result?.ticker && event.action_result?.signal) {
-              setWorkflowState(event.action_result);
+              applyWorkflowResultToWorkspace(event.action_result, {
+                queueLength: 1,
+                queueIndex: 0,
+                confirmExecution: false,
+                shouldAutoExecute: false,
+                announceInChat: false,
+                showToast: true,
+              });
             }
             if (token && event.action_result?.history_id) {
               const historyResponse = await apiFetch("/api/history");
@@ -1170,8 +1254,13 @@ export default function Page() {
         }
       }
     } catch (error) {
+      if (copilotStreamTimeoutRef.current) {
+        window.clearTimeout(copilotStreamTimeoutRef.current);
+        copilotStreamTimeoutRef.current = null;
+      }
       setCopilotThinking([]);
       setCopilotStreamingReply("");
+      setShowCopilotStreamBox(false);
       setMessages((current) => [
         ...current,
         { role: "assistant", content: `I could not answer that just now: ${error.message}` },
@@ -1653,7 +1742,7 @@ export default function Page() {
                 </button>
               </div>
             </div>
-            <div className="copilot-messages">
+            <div className="copilot-messages" ref={copilotMessagesRef}>
               {messages.map((message, index) => (
                 <div className={`copilot-message-row ${message.role}`} key={`${message.role}-${index}`}>
                   <div className={`copilot-message ${message.role}`}>
@@ -1661,24 +1750,26 @@ export default function Page() {
                   </div>
                 </div>
               ))}
-            </div>
-            {copilotPending && (copilotThinking.length || copilotStreamingReply) ? (
-              <div className="copilot-stream-box">
-                <p className="copilot-stream-title">Assistant is working</p>
-                {copilotThinking.length ? (
-                  <div className="copilot-stream-log">
-                    {copilotThinking.map((entry, index) => (
-                      <div className="copilot-stream-step" key={`${entry}-${index}`}>
-                        {entry}
+              {showCopilotStreamBox && (copilotThinking.length || copilotStreamingReply) ? (
+                <div className="copilot-message-row assistant">
+                  <div className="copilot-stream-box">
+                    <p className="copilot-stream-title">Assistant is working</p>
+                    {copilotThinking.length ? (
+                      <div className="copilot-stream-log">
+                        {copilotThinking.map((entry, index) => (
+                          <div className="copilot-stream-step" key={`${entry}-${index}`}>
+                            {entry}
+                          </div>
+                        ))}
                       </div>
-                    ))}
+                    ) : null}
+                    {copilotStreamingReply ? (
+                      <div className="copilot-stream-reply">{copilotStreamingReply}</div>
+                    ) : null}
                   </div>
-                ) : null}
-                {copilotStreamingReply ? (
-                  <div className="copilot-stream-reply">{copilotStreamingReply}</div>
-                ) : null}
-              </div>
-            ) : null}
+                </div>
+              ) : null}
+            </div>
             <div className="copilot-compose">
               <textarea
                 rows={4}

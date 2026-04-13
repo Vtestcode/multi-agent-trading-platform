@@ -62,6 +62,13 @@ class RiskAgent:
         ticker = state.get("ticker", "UNKNOWN")
         signal = state.get("signal", "HOLD")
         market_data = state.get("market_data") or {}
+        research_context = {
+            "summary": state.get("research_summary"),
+            "sentiment": state.get("research_sentiment"),
+            "updates": state.get("research_updates") or [],
+            "catalysts": state.get("research_catalysts") or [],
+            "risk_flags": state.get("research_risk_flags") or [],
+        }
         broker_connection = state.get("broker_connection")
 
         if not broker_connection:
@@ -82,6 +89,7 @@ class RiskAgent:
             ticker=ticker,
             signal=signal,
             market_data=market_data,
+            research_context=research_context,
             account=account,
             open_positions=open_positions,
             portfolio_history=portfolio_history,
@@ -208,6 +216,7 @@ class RiskAgent:
         ticker: str,
         signal: str,
         market_data: Dict[str, Any],
+        research_context: Dict[str, Any],
         account: Dict[str, Any],
         open_positions: list[Dict[str, Any]],
         portfolio_history: Dict[str, Any],
@@ -225,6 +234,8 @@ class RiskAgent:
             f"Maximum shares allowed by policy: {max_share_count}\n\n"
             "Market data JSON:\n"
             f"{compact_json(market_data)}\n\n"
+            "Research context JSON:\n"
+            f"{compact_json(research_context)}\n\n"
             "Account JSON:\n"
             f"{compact_json(account)}\n\n"
             "Open positions JSON:\n"
@@ -235,6 +246,7 @@ class RiskAgent:
             "- Approve only when the signal is actionable and the trade fits liquidity and buying-power policy.\n"
             "- Reject non-BUY signals.\n"
             "- Never recommend more shares than the policy maximum.\n"
+            "- Use current catalysts and risk flags from the research context when judging near-term execution risk.\n"
             "- Explain the most important controls that were triggered."
         )
 

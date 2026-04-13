@@ -1454,7 +1454,9 @@ textarea {
 .copilot-stream-box {
   display: grid;
   gap: 10px;
-  margin: 0 0 12px;
+  width: fit-content;
+  max-width: 86%;
+  margin: 0;
   padding: 12px;
   border-radius: 16px;
   border: 1px dashed rgba(121, 146, 188, 0.34);
@@ -1463,7 +1465,7 @@ textarea {
 
 .copilot-stream-title {
   margin: 0;
-  font-size: 0.78rem;
+  font-size: 0.72rem;
   letter-spacing: 0.08em;
   text-transform: uppercase;
   color: #91a6c9;
@@ -1476,15 +1478,16 @@ textarea {
 
 .copilot-stream-step {
   color: #c5d1e5;
-  font-size: 0.93rem;
-  line-height: 1.45;
+  font-size: 0.84rem;
+  line-height: 1.4;
 }
 
 .copilot-stream-reply {
   padding-top: 4px;
   border-top: 1px solid rgba(121, 146, 188, 0.16);
   color: #eef4ff;
-  line-height: 1.55;
+  font-size: 0.9rem;
+  line-height: 1.45;
 }
 
 .copilot-compose {

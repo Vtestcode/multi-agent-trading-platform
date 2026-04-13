@@ -28,6 +28,12 @@ class TradingState(TypedDict, total=False):
     scanner_summary: str
     market_data: Dict[str, Any]
     market_context: Dict[str, Any]
+    research_summary: str
+    research_sentiment: Literal["bullish", "bearish", "mixed", "neutral"]
+    research_updates: list[str]
+    research_catalysts: list[str]
+    research_risk_flags: list[str]
+    research_inputs: Dict[str, Any]
     signal: Literal["BUY", "SELL", "HOLD"]
     strategy_reason: str
     strategy_confidence: float

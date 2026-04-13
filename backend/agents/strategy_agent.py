@@ -39,9 +39,21 @@ class StrategyAgent:
 
     async def run(self, state: Dict[str, Any]) -> Dict[str, Any]:
         market_data = state.get("market_data") or {}
+        research_context = {
+            "summary": state.get("research_summary"),
+            "sentiment": state.get("research_sentiment"),
+            "updates": state.get("research_updates") or [],
+            "catalysts": state.get("research_catalysts") or [],
+            "risk_flags": state.get("research_risk_flags") or [],
+        }
         ticker = state.get("ticker", "UNKNOWN")
         strategy_inputs = await self._gather_inputs(state, ticker)
-        prompt = self._build_prompt(ticker=ticker, market_data=market_data, strategy_inputs=strategy_inputs)
+        prompt = self._build_prompt(
+            ticker=ticker,
+            market_data=market_data,
+            research_context=research_context,
+            strategy_inputs=strategy_inputs,
+        )
 
         result = await self.agent.run(prompt)
         decision = result.output
@@ -79,17 +91,25 @@ class StrategyAgent:
         return inputs
 
     @staticmethod
-    def _build_prompt(ticker: str, market_data: Dict[str, Any], strategy_inputs: Dict[str, Any]) -> str:
+    def _build_prompt(
+        ticker: str,
+        market_data: Dict[str, Any],
+        research_context: Dict[str, Any],
+        strategy_inputs: Dict[str, Any],
+    ) -> str:
         return (
             "Evaluate this market snapshot and produce a trading signal.\n\n"
             f"Ticker: {ticker}\n"
             "Market data JSON:\n"
             f"{compact_json(market_data)}\n\n"
+            "Research context JSON:\n"
+            f"{compact_json(research_context)}\n\n"
             "Additional strategy inputs JSON:\n"
             f"{compact_json(strategy_inputs)}\n\n"
             "Decision guidance:\n"
             "- BUY when bullish evidence is strong and well supported.\n"
             "- SELL when trend deterioration is clear.\n"
             "- HOLD when evidence is mixed, weak, or insufficient.\n"
+            "- Use the research context to weigh current catalysts and near-term risks.\n"
             "- Mention key risks that could invalidate the view."
         )

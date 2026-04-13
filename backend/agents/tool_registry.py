@@ -12,6 +12,7 @@ import httpx
 logger = logging.getLogger(__name__)
 
 POLYGON_BASE_URL = "https://api.polygon.io"
+TAVILY_BASE_URL = "https://api.tavily.com"
 ALPACA_PAPER_BASE_URL = "https://paper-api.alpaca.markets"
 ALPACA_DATA_BASE_URL = "https://data.alpaca.markets"
 DEFAULT_ACTIVE_UNIVERSE = [
@@ -58,6 +59,7 @@ class TradingToolRegistry:
 
     def __init__(self, polygon_api_key: str | None = None, timeout_seconds: float = 20.0) -> None:
         self.polygon_api_key = polygon_api_key or os.getenv("POLYGON_API_KEY")
+        self.tavily_api_key = os.getenv("TAVILY_API_KEY")
         self.timeout_seconds = timeout_seconds
         self._tools: dict[str, ToolHandler] = {
             "get_stock_bars": self.get_stock_bars,
@@ -65,6 +67,7 @@ class TradingToolRegistry:
             "get_most_actives": self.get_most_actives,
             "check_market_clock": self.check_market_clock,
             "get_stock_news": self.get_stock_news,
+            "search_web_research": self.search_web_research,
             "calculate_rsi": self.calculate_rsi,
             "calculate_macd": self.calculate_macd,
             "get_sec_filing": self.get_sec_filing,
@@ -92,6 +95,7 @@ class TradingToolRegistry:
                 "get_most_actives",
                 "check_market_clock",
                 "get_stock_news",
+                "search_web_research",
             ],
             "strategy": [
                 "calculate_rsi",
@@ -254,6 +258,36 @@ class TradingToolRegistry:
             }
             for item in results[:limit]
         ]
+
+    async def search_web_research(self, query: str, limit: int = 5) -> dict[str, Any]:
+        self._require_tavily()
+        payload = await self._json_post(
+            f"{TAVILY_BASE_URL}/search",
+            json={
+                "api_key": self.tavily_api_key,
+                "query": query,
+                "search_depth": "advanced",
+                "topic": "news",
+                "max_results": max(1, min(limit, 8)),
+                "include_answer": True,
+                "include_raw_content": False,
+            },
+        )
+        results = payload.get("results") or []
+        return {
+            "query": query,
+            "answer": payload.get("answer"),
+            "results": [
+                {
+                    "title": item.get("title"),
+                    "url": item.get("url"),
+                    "content": item.get("content"),
+                    "score": item.get("score"),
+                    "published_date": item.get("published_date"),
+                }
+                for item in results[:limit]
+            ],
+        }
 
     async def calculate_rsi(self, ticker: str, period: int = 14) -> dict[str, Any]:
         closes = await self._fetch_close_series(ticker=ticker, limit=max(period + 20, 40))
@@ -498,6 +532,10 @@ class TradingToolRegistry:
         if not self.polygon_api_key:
             raise ToolRegistryError("POLYGON_API_KEY is required for this tool")
 
+    def _require_tavily(self) -> None:
+        if not self.tavily_api_key:
+            raise ToolRegistryError("TAVILY_API_KEY is required for Tavily web research")
+
     async def _polygon_get(self, url: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
         query = dict(params or {})
         query["apiKey"] = self.polygon_api_key
@@ -570,6 +608,18 @@ class TradingToolRegistry:
         merged_headers = {"Accept": "application/json", **(headers or {})}
         async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
             response = await client.get(url, params=params, headers=merged_headers)
+        self._raise_for_status(response, f"Request failed: {url}")
+        return response.json()
+
+    async def _json_post(
+        self,
+        url: str,
+        json: dict[str, Any],
+        headers: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        merged_headers = {"Accept": "application/json", "Content-Type": "application/json", **(headers or {})}
+        async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
+            response = await client.post(url, json=json, headers=merged_headers)
         self._raise_for_status(response, f"Request failed: {url}")
         return response.json()
 

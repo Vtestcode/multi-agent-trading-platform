@@ -43,6 +43,9 @@ def build_graph():
     async def strategy_node(state: TradingState) -> Dict[str, Any]:
         return await coordinator.run_strategy(state)
 
+    async def research_node(state: TradingState) -> Dict[str, Any]:
+        return await coordinator.run_research(state)
+
     async def validate_strategy_node(state: TradingState) -> Dict[str, Any]:
         return await coordinator.validate_strategy(state)
 
@@ -64,6 +67,7 @@ def build_graph():
     graph = StateGraph(TradingState)
     graph.add_node("scan_market", scanner_node)
     graph.add_node("fetch_market_data", market_data_node)
+    graph.add_node("research_market", research_node)
     graph.add_node("generate_signal", strategy_node)
     graph.add_node("validate_signal", validate_strategy_node)
     graph.add_node("risk_check", risk_node)
@@ -74,7 +78,8 @@ def build_graph():
 
     graph.set_entry_point("scan_market")
     graph.add_edge("scan_market", "fetch_market_data")
-    graph.add_edge("fetch_market_data", "generate_signal")
+    graph.add_edge("fetch_market_data", "research_market")
+    graph.add_edge("research_market", "generate_signal")
     graph.add_edge("generate_signal", "validate_signal")
     graph.add_edge("validate_signal", "risk_check")
     graph.add_edge("risk_check", "validate_risk")
