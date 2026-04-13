@@ -62,25 +62,95 @@ class ResearchAgent:
     async def _gather_inputs(self, state: Dict[str, Any], ticker: str) -> Dict[str, Any]:
         context = ToolContext(state=state, agent_name="research")
         inputs: Dict[str, Any] = {}
-        tool_calls = [
-            ("check_market_clock", {}),
-            ("get_latest_quote", {"ticker": ticker}),
-            ("get_stock_news", {"ticker": ticker, "limit": 5}),
-            (
-                "search_web_research",
-                {
-                    "query": f"{ticker} stock latest news catalysts risks analyst updates today",
-                    "limit": 5,
-                },
-            ),
-            ("get_earnings_calendar", {"ticker": ticker}),
-            ("get_vix_level", {}),
-            ("get_sector_performance", {}),
-            ("get_most_actives", {"limit": 5}),
-        ]
-        for tool_name, kwargs in tool_calls:
-            inputs[tool_name] = await self.tool_registry.call_tool(tool_name, context=context, **kwargs)
+        inputs["check_market_clock"] = await self._call_best_effort(
+            "check_market_clock",
+            context=context,
+        )
+        inputs["get_latest_quote"] = await self._get_quote_with_fallback(
+            state=state,
+            ticker=ticker,
+            context=context,
+        )
+        inputs["get_stock_news"] = await self._call_best_effort(
+            "get_stock_news",
+            context=context,
+            ticker=ticker,
+            limit=5,
+        )
+        inputs["search_web_research"] = await self.tool_registry.call_tool(
+            "search_web_research",
+            context=context,
+            query=f"{ticker} stock latest news catalysts risks analyst updates today",
+            limit=5,
+        )
+        inputs["get_earnings_calendar"] = await self._call_best_effort(
+            "get_earnings_calendar",
+            context=context,
+            ticker=ticker,
+        )
+        inputs["get_vix_level"] = await self._call_best_effort(
+            "get_vix_level",
+            context=context,
+        )
+        inputs["get_sector_performance"] = await self._call_best_effort(
+            "get_sector_performance",
+            context=context,
+        )
+        inputs["get_most_actives"] = await self._call_best_effort(
+            "get_most_actives",
+            context=context,
+            limit=5,
+        )
         return inputs
+
+    async def _call_best_effort(
+        self,
+        tool_name: str,
+        context: ToolContext,
+        **kwargs: Any,
+    ) -> Any:
+        try:
+            return await self.tool_registry.call_tool(tool_name, context=context, **kwargs)
+        except Exception as exc:
+            logger.warning("[ResearchAgent] %s failed for %s: %s", tool_name, kwargs.get("ticker", "market"), exc)
+            return {"status": "unavailable", "detail": str(exc)}
+
+    async def _get_quote_with_fallback(
+        self,
+        state: Dict[str, Any],
+        ticker: str,
+        context: ToolContext,
+    ) -> Dict[str, Any]:
+        try:
+            return await self.tool_registry.call_tool("get_latest_quote", context=context, ticker=ticker)
+        except Exception as exc:
+            logger.warning("[ResearchAgent] get_latest_quote failed for %s: %s", ticker, exc)
+            fallback_quote = self._quote_from_market_data(state, ticker)
+            if fallback_quote:
+                fallback_quote["detail"] = str(exc)
+                return fallback_quote
+            return {"status": "unavailable", "detail": str(exc)}
+
+    @staticmethod
+    def _quote_from_market_data(state: Dict[str, Any], ticker: str) -> Dict[str, Any] | None:
+        market_data = state.get("market_data") or {}
+        if str(market_data.get("ticker") or "").upper() != ticker.upper():
+            return None
+
+        current_price = market_data.get("current_price")
+        if current_price is None:
+            return None
+
+        recent_bars = market_data.get("recent_bars") or []
+        latest_bar = recent_bars[-1] if recent_bars else {}
+        return {
+            "ticker": ticker.upper(),
+            "last_price": float(current_price),
+            "close_price": float(current_price),
+            "timestamp": latest_bar.get("date") or market_data.get("latest_close_date"),
+            "source": "market_data_fallback",
+            "status": "fallback",
+        }
 
     @staticmethod
     def _build_prompt(ticker: str, market_data: Dict[str, Any], research_inputs: Dict[str, Any]) -> str:
