@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import random
 from dataclasses import dataclass, asdict
 from typing import Any
 
@@ -21,7 +22,43 @@ DEFAULT_AUTO_TRADE_UNIVERSE = [
     "TSLA",
     "AMD",
     "NFLX",
+    "PLTR",
+    "JPM",
+    "LLY",
+    "COST",
+    "CRM",
+    "ORCL",
+    "ADBE",
+    "INTU",
+    "QCOM",
+    "TXN",
+    "AMAT",
+    "MU",
+    "PANW",
+    "CRWD",
+    "SHOP",
+    "UBER",
+    "ABNB",
+    "BKNG",
+    "DIS",
+    "WMT",
+    "HD",
+    "LOW",
+    "NKE",
+    "MCD",
+    "SBUX",
+    "XOM",
+    "CVX",
+    "UNH",
+    "ABBV",
+    "PFE",
+    "MRK",
+    "GS",
+    "BAC",
+    "KO",
+    "PEP",
 ]
+DEFAULT_SCAN_SAMPLE_SIZE = 5
 
 
 @dataclass(slots=True)
@@ -147,5 +184,7 @@ class MarketScannerAgent:
         if env_value:
             parsed = [ticker.strip().upper() for ticker in env_value.split(",") if ticker.strip()]
             if parsed:
-                return parsed
-        return list(DEFAULT_AUTO_TRADE_UNIVERSE)
+                return parsed[:DEFAULT_SCAN_SAMPLE_SIZE]
+        if len(DEFAULT_AUTO_TRADE_UNIVERSE) <= DEFAULT_SCAN_SAMPLE_SIZE:
+            return list(DEFAULT_AUTO_TRADE_UNIVERSE)
+        return random.sample(DEFAULT_AUTO_TRADE_UNIVERSE, DEFAULT_SCAN_SAMPLE_SIZE)
