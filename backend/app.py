@@ -6,6 +6,7 @@ import os
 import sys
 import logging
 from pathlib import Path
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, HTTPException, status
@@ -34,7 +35,8 @@ from auth import (
     upsert_google_user,
     verify_google_id_token,
 )
-from db import Base, engine, get_db
+from db import Base, SessionLocal, engine, get_db
+from day_session_manager import DaySessionManager
 from integrations import (
     delete_broker_connection,
     get_broker_connection,
@@ -95,16 +97,35 @@ if langsmith_enabled():
 
 app.state.last_workflow_state = None
 app.state.copilot = CopilotAgent()
+app.state.day_session_manager = None
 
 
 @app.on_event("startup")
-def startup() -> None:
+async def startup() -> None:
     Base.metadata.create_all(bind=engine)
+    app.state.day_session_manager = DaySessionManager(run_session_callback=_run_day_session_cycle)
+    await app.state.day_session_manager.start()
+
+
+@app.on_event("shutdown")
+async def shutdown() -> None:
+    manager = getattr(app.state, "day_session_manager", None)
+    if manager is not None:
+        await manager.stop()
 
 
 class RunRequest(BaseModel):
     ticker: str | None = Field(default=None, min_length=1, max_length=10, description="Optional manual ticker override")
     confirm_execution: bool = False
+    auto_execute: bool = False
+
+
+class DaySessionRequest(BaseModel):
+    ticker: str | None = Field(default=None, min_length=1, max_length=10)
+    start_time: str = Field(default="09:30", pattern=r"^\d{2}:\d{2}$")
+    end_time: str = Field(default="15:30", pattern=r"^\d{2}:\d{2}$")
+    interval_minutes: int = Field(default=15, ge=1, le=240)
+    timezone: str = Field(default="America/Chicago", min_length=3, max_length=64)
     auto_execute: bool = False
 
 
@@ -130,6 +151,121 @@ class CopilotResponse(BaseModel):
 
 def _stream_event(payload: dict) -> str:
     return json.dumps(payload, default=str) + "\n"
+
+
+def _validate_day_session_payload(payload: DaySessionRequest) -> None:
+    try:
+        ZoneInfo(payload.timezone)
+    except ZoneInfoNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Invalid timezone.") from exc
+    if payload.end_time <= payload.start_time:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="end_time must be later than start_time for the same trading day.",
+        )
+
+
+async def _execute_workflow_for_user(
+    *,
+    ticker: str | None,
+    confirm_execution: bool,
+    auto_execute: bool,
+    current_user: User | None,
+    db: Session,
+) -> dict:
+    ticker = ticker.strip().upper() if ticker else None
+    if confirm_execution:
+        if current_user is None:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Sign in is required before execution can be approved.",
+            )
+        if not has_pending_execution_approval(db, current_user, ticker):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    "Execution approval is only allowed for the most recent pending trade candidate. "
+                    "Run analysis first, then approve the pending execution from the workspace."
+                ),
+            )
+    if auto_execute and not confirm_execution and current_user is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Sign in is required before auto execution can be enabled.",
+        )
+    connection = get_broker_connection(db, current_user.id, "alpaca") if current_user else None
+    if auto_execute and not confirm_execution and connection is None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Connect an execution-capable provider before enabling auto execution.",
+        )
+    excluded_tickers = recent_unique_tickers(db, current_user, limit=3) if current_user and not ticker and not confirm_execution else []
+    broker_connection = None
+    broker_connection_summary = None
+    broker_connection_error = None
+
+    if connection:
+        try:
+            broker_connection = resolve_execution_credentials(connection)
+            broker_connection_summary = serialize_broker_connection(connection)
+        except Exception as exc:
+            broker_connection_error = (
+                "Connected broker credentials could not be loaded. "
+                "Reconnect your broker account and try again."
+            )
+            broker_connection_summary = {
+                "provider": connection.provider,
+                "display_name": connection.provider.title(),
+                "is_connected": False,
+                "error": str(exc),
+            }
+
+    try:
+        result = await run_in_threadpool(
+            run_trading_loop_sync,
+            ticker,
+            broker_connection,
+            broker_connection_summary,
+            excluded_tickers,
+            (confirm_execution or auto_execute) and broker_connection is not None,
+        )
+    except Exception as exc:
+        logger.exception("Workflow execution failed")
+        detail = str(exc) or "Workflow execution failed."
+        if "401" in detail and "unauthorized" in detail.lower():
+            detail = (
+                "Connected Alpaca credentials were rejected. "
+                "Reconnect your Alpaca paper-trading API key and secret, then try again."
+            )
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=detail) from exc
+
+    result["current_user"] = UserResponse.from_model(current_user).model_dump() if current_user else None
+    result["broker_connection_error"] = broker_connection_error
+    result["excluded_tickers"] = excluded_tickers
+    result["execution_confirmation_armed"] = confirm_execution and broker_connection is not None
+    result["auto_execute_enabled"] = auto_execute and broker_connection is not None
+    if current_user:
+        run_record = create_workflow_run(db, current_user, result)
+        result["history_id"] = run_record.id
+    app.state.last_workflow_state = result
+    return result
+
+
+async def _run_day_session_cycle(user_id: int, ticker: str | None, auto_execute: bool) -> dict[str, Any]:
+    db = SessionLocal()
+    try:
+        current_user = db.get(User, user_id)
+        if current_user is None:
+            raise RuntimeError("User not found for day session.")
+        return await _execute_workflow_for_user(
+            ticker=ticker,
+            confirm_execution=False,
+            auto_execute=auto_execute,
+            current_user=current_user,
+            db=db,
+        )
+    finally:
+        db.close()
 
 
 class RegisterRequest(BaseModel):
@@ -193,6 +329,25 @@ class WorkflowRunResponse(BaseModel):
     strategy_confidence: str | None = None
     summary: str | None = None
     created_at: str | None = None
+
+
+class DaySessionResponse(BaseModel):
+    enabled: bool
+    status: str
+    ticker: str | None = None
+    start_time: str
+    end_time: str
+    interval_minutes: int
+    timezone: str
+    auto_execute: bool
+    created_at: str
+    last_run_at: str | None = None
+    next_run_at: str | None = None
+    last_error: str | None = None
+    run_count: int
+    active_run: bool
+    last_window_date: str | None = None
+    last_result: dict | None = None
 
 
 @app.get("/api/health", response_model=HealthResponse)
@@ -309,84 +464,49 @@ async def run_workflow(
     current_user: User | None = Depends(get_optional_user),
     db: Session = Depends(get_db),
 ) -> dict:
-    ticker = payload.ticker.strip().upper() if payload.ticker else None
-    confirm_execution = bool(payload.confirm_execution)
-    auto_execute = bool(payload.auto_execute)
-    if confirm_execution:
-        if current_user is None:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Sign in is required before execution can be approved.",
-            )
-        if not has_pending_execution_approval(db, current_user, ticker):
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail=(
-                    "Execution approval is only allowed for the most recent pending trade candidate. "
-                    "Run analysis first, then approve the pending execution from the workspace."
-                ),
-            )
-    if auto_execute and not confirm_execution and current_user is None:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Sign in is required before auto execution can be enabled.",
-        )
-    connection = get_broker_connection(db, current_user.id, "alpaca") if current_user else None
-    if auto_execute and not confirm_execution and connection is None:
+    return await _execute_workflow_for_user(
+        ticker=payload.ticker,
+        confirm_execution=bool(payload.confirm_execution),
+        auto_execute=bool(payload.auto_execute),
+        current_user=current_user,
+        db=db,
+    )
+
+
+@app.get("/api/day-session", response_model=DaySessionResponse | None)
+def get_day_session(current_user: User = Depends(get_current_user)) -> DaySessionResponse | None:
+    snapshot = app.state.day_session_manager.snapshot_for_user(current_user.id)
+    return DaySessionResponse(**snapshot) if snapshot else None
+
+
+@app.post("/api/day-session", response_model=DaySessionResponse)
+def start_day_session(
+    payload: DaySessionRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> DaySessionResponse:
+    _validate_day_session_payload(payload)
+    if payload.auto_execute and get_broker_connection(db, current_user.id, "alpaca") is None:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail="Connect an execution-capable provider before enabling auto execution.",
+            detail="Connect an execution-capable provider before enabling auto execution for a day session.",
         )
-    excluded_tickers = recent_unique_tickers(db, current_user, limit=3) if current_user and not ticker and not confirm_execution else []
-    broker_connection = None
-    broker_connection_summary = None
-    broker_connection_error = None
+    snapshot = app.state.day_session_manager.upsert_session(
+        user_id=current_user.id,
+        ticker=payload.ticker,
+        start_time=payload.start_time,
+        end_time=payload.end_time,
+        interval_minutes=payload.interval_minutes,
+        timezone=payload.timezone,
+        auto_execute=payload.auto_execute,
+    )
+    return DaySessionResponse(**snapshot)
 
-    if connection:
-        try:
-            broker_connection = resolve_execution_credentials(connection)
-            broker_connection_summary = serialize_broker_connection(connection)
-        except Exception as exc:
-            broker_connection_error = (
-                "Connected broker credentials could not be loaded. "
-                "Reconnect your broker account and try again."
-            )
-            broker_connection_summary = {
-                "provider": connection.provider,
-                "display_name": connection.provider.title(),
-                "is_connected": False,
-                "error": str(exc),
-            }
 
-    try:
-        result = await run_in_threadpool(
-            run_trading_loop_sync,
-            ticker,
-            broker_connection,
-            broker_connection_summary,
-            excluded_tickers,
-            (confirm_execution or auto_execute) and broker_connection is not None,
-        )
-    except Exception as exc:
-        logger.exception("Workflow execution failed")
-        detail = str(exc) or "Workflow execution failed."
-        if "401" in detail and "unauthorized" in detail.lower():
-            detail = (
-                "Connected Alpaca credentials were rejected. "
-                "Reconnect your Alpaca paper-trading API key and secret, then try again."
-            )
-        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=detail) from exc
-
-    result["current_user"] = UserResponse.from_model(current_user).model_dump() if current_user else None
-    result["broker_connection_error"] = broker_connection_error
-    result["excluded_tickers"] = excluded_tickers
-    result["execution_confirmation_armed"] = confirm_execution and broker_connection is not None
-    result["auto_execute_enabled"] = auto_execute and broker_connection is not None
-    if current_user:
-        run_record = create_workflow_run(db, current_user, result)
-        result["history_id"] = run_record.id
-    app.state.last_workflow_state = result
-    return result
+@app.delete("/api/day-session", response_model=DaySessionResponse | None)
+def stop_day_session(current_user: User = Depends(get_current_user)) -> DaySessionResponse | None:
+    snapshot = app.state.day_session_manager.stop_session(current_user.id)
+    return DaySessionResponse(**snapshot) if snapshot else None
 
 
 @app.post("/api/copilot", response_model=CopilotResponse)

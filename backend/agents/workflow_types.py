@@ -45,6 +45,9 @@ class TradingState(TypedDict, total=False):
     risk_controls_triggered: list[str]
     risk_details: Dict[str, Any]
     share_count: int
+    trade_action: str
+    execution_side: Literal["buy", "sell"] | None
+    position_context: Dict[str, Any]
     execution_status: str
     execution_detail: str
     execution_tool: str | None

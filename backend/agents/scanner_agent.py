@@ -58,7 +58,8 @@ DEFAULT_AUTO_TRADE_UNIVERSE = [
     "KO",
     "PEP",
 ]
-DEFAULT_SCAN_SAMPLE_SIZE = 5
+DEFAULT_SCAN_SAMPLE_SIZE = 2
+DEFAULT_SCAN_CONCURRENCY = 1
 
 
 @dataclass(slots=True)
@@ -100,14 +101,23 @@ class MarketScannerAgent:
 
         universe = self._resolve_universe()
         logger.info("[MarketScannerAgent] Scanning %s candidate tickers", len(universe))
-        snapshots = await self._fetch_universe(universe)
+        snapshots, failures = await self._fetch_universe(universe)
+        if not snapshots:
+            full_universe = self._resolve_universe(full_scan=True)
+            if full_universe != universe:
+                logger.info("[MarketScannerAgent] Retrying scan across full universe of %s names", len(full_universe))
+                snapshots, failures = await self._fetch_universe(full_universe)
         ranked = sorted(
             (self._to_candidate(ticker=ticker, market_data=market_data) for ticker, market_data in snapshots),
             key=lambda candidate: candidate.momentum_score,
             reverse=True,
         )
         if not ranked:
-            raise MarketDataError("Scanner could not find any valid candidates in the configured universe.")
+            failure_summary = "; ".join(f"{ticker}: {detail}" for ticker, detail in failures[:5]) if failures else "No market data was returned."
+            raise MarketDataError(
+                "Scanner could not find any valid candidates in the configured universe. "
+                f"Recent failures: {failure_summary}"
+            )
 
         excluded = {ticker.strip().upper() for ticker in (excluded_tickers or []) if ticker}
         top_candidates = ranked[: self.max_candidates]
@@ -137,8 +147,9 @@ class MarketScannerAgent:
             "market_data": next(market_data for ticker, market_data in snapshots if ticker == selected.ticker),
         }
 
-    async def _fetch_universe(self, universe: list[str]) -> list[tuple[str, dict[str, Any]]]:
-        semaphore = asyncio.Semaphore(2)
+    async def _fetch_universe(self, universe: list[str]) -> tuple[list[tuple[str, dict[str, Any]]], list[tuple[str, str]]]:
+        semaphore = asyncio.Semaphore(self._scan_concurrency())
+        failures: list[tuple[str, str]] = []
 
         async def fetch_one(ticker: str) -> tuple[str, dict[str, Any]] | None:
             async with semaphore:
@@ -147,10 +158,11 @@ class MarketScannerAgent:
                     return ticker, result["market_data"]
                 except Exception as exc:
                     logger.warning("[MarketScannerAgent] Skipping %s during scan: %s", ticker, exc)
+                    failures.append((ticker, str(exc)))
                     return None
 
         results = await asyncio.gather(*(fetch_one(ticker) for ticker in universe))
-        return [item for item in results if item is not None]
+        return [item for item in results if item is not None], failures
 
     @staticmethod
     def _to_candidate(ticker: str, market_data: dict[str, Any]) -> ScanCandidate:
@@ -179,12 +191,31 @@ class MarketScannerAgent:
         )
 
     @staticmethod
-    def _resolve_universe() -> list[str]:
+    def _resolve_universe(full_scan: bool = False) -> list[str]:
         env_value = os.getenv("AUTO_TRADE_UNIVERSE")
+        sample_size = MarketScannerAgent._scan_sample_size()
         if env_value:
             parsed = [ticker.strip().upper() for ticker in env_value.split(",") if ticker.strip()]
             if parsed:
-                return parsed[:DEFAULT_SCAN_SAMPLE_SIZE]
-        if len(DEFAULT_AUTO_TRADE_UNIVERSE) <= DEFAULT_SCAN_SAMPLE_SIZE:
+                return parsed if full_scan else parsed[:sample_size]
+        if len(DEFAULT_AUTO_TRADE_UNIVERSE) <= sample_size or full_scan:
             return list(DEFAULT_AUTO_TRADE_UNIVERSE)
-        return random.sample(DEFAULT_AUTO_TRADE_UNIVERSE, DEFAULT_SCAN_SAMPLE_SIZE)
+        return random.sample(DEFAULT_AUTO_TRADE_UNIVERSE, sample_size)
+
+    @staticmethod
+    def _scan_sample_size() -> int:
+        raw_value = os.getenv("AUTO_SCAN_SAMPLE_SIZE", str(DEFAULT_SCAN_SAMPLE_SIZE)).strip()
+        try:
+            parsed = int(raw_value)
+        except ValueError:
+            parsed = DEFAULT_SCAN_SAMPLE_SIZE
+        return max(1, min(parsed, len(DEFAULT_AUTO_TRADE_UNIVERSE)))
+
+    @staticmethod
+    def _scan_concurrency() -> int:
+        raw_value = os.getenv("AUTO_SCAN_CONCURRENCY", str(DEFAULT_SCAN_CONCURRENCY)).strip()
+        try:
+            parsed = int(raw_value)
+        except ValueError:
+            parsed = DEFAULT_SCAN_CONCURRENCY
+        return max(1, min(parsed, 3))

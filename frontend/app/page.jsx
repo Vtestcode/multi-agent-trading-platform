@@ -332,6 +332,8 @@ function CommandPalette({ open, onClose, commands }) {
 }
 
 function RunHistoryPanel({ history }) {
+  const recentRuns = history.slice(0, 3);
+
   return (
     <article className="card history-card">
       <div className="card-head">
@@ -341,8 +343,8 @@ function RunHistoryPanel({ history }) {
         </div>
       </div>
       <div className="history-list">
-        {history.length ? (
-          history.map((run) => (
+        {recentRuns.length ? (
+          recentRuns.map((run) => (
             <div className="history-row" key={run.id}>
               <div>
                 <strong>{run.ticker}</strong>
@@ -1394,6 +1396,13 @@ export default function Page() {
           },
         ]
       : []),
+    {
+      label: "Open day session",
+      description: "View intraday session automation",
+      onSelect: () => {
+        window.location.href = "/day-session";
+      },
+    },
     token
       ? {
           label: "Sign out",
@@ -1510,6 +1519,9 @@ export default function Page() {
                   History
                 </Link>
               ) : null}
+              <Link href="/day-session" className="help-link">
+                Day Session
+              </Link>
               <Link href="/help" className="help-link">
                 Help
               </Link>

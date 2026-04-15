@@ -61,15 +61,22 @@ class ExecutionAgent:
         risk_approved = bool(state.get("risk_approved", False))
         share_count = int(state.get("share_count", 0) or 0)
         signal = state.get("signal", "HOLD")
+        execution_side = str(state.get("execution_side") or ("sell" if signal == "SELL" else "buy")).lower()
+        trade_action = str(state.get("trade_action") or "NO_TRADE")
         broker_connection = state.get("broker_connection")
         allow_execution = bool(state.get("allow_execution", False))
 
-        if not risk_approved or signal != "BUY" or share_count < 1:
+        if not risk_approved or share_count < 1 or execution_side not in {"buy", "sell"}:
             detail = (
-                f"Execution skipped for {ticker}: risk_approved={risk_approved}, signal={signal}, share_count={share_count}."
+                f"Execution skipped for {ticker}: risk_approved={risk_approved}, signal={signal}, "
+                f"execution_side={execution_side}, share_count={share_count}."
             )
             logger.info("[ExecutionAgent] %s", detail)
-            return self._result_to_state(ExecutionResult(status="SKIPPED", detail=detail))
+            return self._result_to_state(
+                ExecutionResult(status="SKIPPED", detail=detail),
+                execution_side=execution_side if execution_side in {"buy", "sell"} else None,
+                trade_action=trade_action,
+            )
 
         if not broker_connection:
             detail = (
@@ -78,13 +85,15 @@ class ExecutionAgent:
             )
             logger.info("[ExecutionAgent] %s", detail)
             return self._result_to_state(
-                ExecutionResult(status="SKIPPED", detail=detail, tool_name_used=self.execution_provider)
+                ExecutionResult(status="SKIPPED", detail=detail, tool_name_used=self.execution_provider),
+                execution_side=execution_side,
+                trade_action=trade_action,
             )
 
         if not allow_execution:
             detail = (
-                f"Execution paused for {ticker}: risk checks passed, but trade submission requires explicit confirmation. "
-                "Approve execution from the workspace to place the order."
+                f"Execution paused for {ticker}: risk checks passed for a {execution_side.upper()} order, "
+                "but trade submission requires explicit confirmation. Approve execution from the workspace to place the order."
             )
             logger.info("[ExecutionAgent] %s", detail)
             result = self._result_to_state(
@@ -93,15 +102,18 @@ class ExecutionAgent:
                     detail=detail,
                     order_response=None,
                     tool_name_used=self.execution_provider,
-                )
+                ),
+                execution_side=execution_side,
+                trade_action=trade_action,
             )
             result["execution_requires_confirmation"] = True
             return result
 
         logger.info(
-            "[ExecutionAgent] Preparing execution for %s qty=%s provider=%s",
+            "[ExecutionAgent] Preparing execution for %s qty=%s side=%s provider=%s",
             ticker,
             share_count,
+            execution_side,
             self.execution_provider,
         )
 
@@ -110,6 +122,7 @@ class ExecutionAgent:
                 order_response, tool_name = await self._place_order_via_mcp(
                     ticker=ticker,
                     qty=share_count,
+                    side=execution_side,
                     broker_connection=broker_connection,
                 )
             else:
@@ -117,10 +130,11 @@ class ExecutionAgent:
                     state=state,
                     ticker=ticker,
                     qty=share_count,
+                    side=execution_side,
                     broker_connection=broker_connection,
                 )
 
-            detail = f"Order submitted for {ticker}. qty={share_count} tool={tool_name}."
+            detail = f"Order submitted for {ticker}. side={execution_side} qty={share_count} tool={tool_name}."
             logger.info("[ExecutionAgent] %s", detail)
             return self._result_to_state(
                 ExecutionResult(
@@ -128,7 +142,9 @@ class ExecutionAgent:
                     detail=detail,
                     order_response=order_response,
                     tool_name_used=tool_name,
-                )
+                ),
+                execution_side=execution_side,
+                trade_action=trade_action,
             )
         except Exception as exc:
             logger.exception("[ExecutionAgent] Order submission failed for %s", ticker)
@@ -138,7 +154,9 @@ class ExecutionAgent:
                     detail=f"Order submission failed for {ticker}: {exc}",
                     order_response=None,
                     tool_name_used=self.execution_provider,
-                )
+                ),
+                execution_side=execution_side,
+                trade_action=trade_action,
             )
 
     async def _place_order_via_registry(
@@ -146,6 +164,7 @@ class ExecutionAgent:
         state: Dict[str, Any],
         ticker: str,
         qty: int,
+        side: str,
         broker_connection: Dict[str, Any],
     ) -> tuple[Dict[str, Any], str]:
         context = ToolContext(state=state, agent_name="execution")
@@ -154,7 +173,7 @@ class ExecutionAgent:
             context=context,
             symbol=ticker,
             qty=qty,
-            side="buy",
+            side=side,
             broker_connection=broker_connection,
         )
         return parsed, "place_market_order"
@@ -163,6 +182,7 @@ class ExecutionAgent:
         self,
         ticker: str,
         qty: int,
+        side: str,
         broker_connection: Dict[str, Any],
     ) -> tuple[Dict[str, Any], str]:
         first_attempt = (self.mcp_command, self.mcp_args)
@@ -179,6 +199,7 @@ class ExecutionAgent:
                     args=args,
                     ticker=ticker,
                     qty=qty,
+                    side=side,
                     broker_connection=broker_connection,
                 )
                 return result
@@ -199,6 +220,7 @@ class ExecutionAgent:
         args: list[str],
         ticker: str,
         qty: int,
+        side: str,
         broker_connection: Dict[str, Any],
     ) -> tuple[Dict[str, Any], str]:
         env = {
@@ -224,7 +246,7 @@ class ExecutionAgent:
             logger.info("[ExecutionAgent] Available MCP tools: %s", sorted(available_tools))
 
             tool_name = self._pick_tool_name(available_tools)
-            arguments = self._build_order_args(tool_name=tool_name, ticker=ticker, qty=qty)
+            arguments = self._build_order_args(tool_name=tool_name, ticker=ticker, qty=qty, side=side)
 
             logger.info("[ExecutionAgent] Calling MCP tool=%s arguments=%s", tool_name, arguments)
             tool_result = await session.call_tool(tool_name, arguments=arguments)
@@ -243,11 +265,11 @@ class ExecutionAgent:
         )
 
     @staticmethod
-    def _build_order_args(tool_name: str, ticker: str, qty: int) -> Dict[str, Any]:
+    def _build_order_args(tool_name: str, ticker: str, qty: int, side: str) -> Dict[str, Any]:
         return {
             "symbol": ticker,
             "qty": qty,
-            "side": "buy",
+            "side": side,
             "type": "market",
             "time_in_force": "day",
         }
@@ -283,7 +305,7 @@ class ExecutionAgent:
         return list(DEFAULT_MCP_ARGS)
 
     @staticmethod
-    def _result_to_state(result: ExecutionResult) -> Dict[str, Any]:
+    def _result_to_state(result: ExecutionResult, execution_side: str | None = None, trade_action: str | None = None) -> Dict[str, Any]:
         data = result.to_dict()
         return {
             "execution_status": data["status"],
@@ -291,4 +313,6 @@ class ExecutionAgent:
             "order_response": data["order_response"],
             "execution_tool": data["tool_name_used"],
             "execution_requires_confirmation": False,
+            "execution_side": execution_side,
+            "trade_action": trade_action,
         }

@@ -78,7 +78,21 @@ const sections = [
       "You can sign in with email/password or Google sign-in when configured.",
       "Broker credentials are stored per user and are intended for your own connected account.",
       "The current execution path is centered on Alpaca paper trading for safer testing and deployment reliability.",
+      "To connect Alpaca, enter your Alpaca paper-trading API key in the API key field and your matching Alpaca secret in the secret key field.",
+      "Use paper-trading credentials rather than live keys while testing the platform locally.",
       "If no broker is connected, the platform stays in analysis mode and explains that execution is unavailable.",
+    ],
+  },
+  {
+    title: "Day Session",
+    intro:
+      "The Day Session page lets you run the agent on a repeating schedule during a defined intraday window.",
+    bullets: [
+      "Open the Day Session tab to choose a ticker or leave it blank for auto-selection.",
+      "Set the start time, end time, interval in minutes, and timezone for the session window.",
+      "Session runs are backend-managed, so they continue independently of a single manual run from the homepage.",
+      "The trading workflow can now buy to open longs, sell to close longs, sell to open shorts when allowed, and buy to cover shorts.",
+      "If Auto Execute is disabled, qualifying session runs stop at confirmation instead of placing orders automatically.",
     ],
   },
   {
@@ -121,17 +135,6 @@ const sections = [
       "Leave the ticker field blank to let the scanner choose from the configured universe.",
       "Enter one ticker to force a manual override for that run, or enter several to process them in sequence.",
       "The workspace labels whether the selected symbol came from auto selection or manual override.",
-    ],
-  },
-  {
-    title: "What To Do When Something Fails",
-    intro:
-      "A few issues are normal during setup, especially around local development and external providers.",
-    bullets: [
-      "If the backend cannot be reached, confirm the FastAPI service is running and your frontend API URL points to the right backend.",
-      "If Google sign-in does not appear, verify the frontend Google client ID and OAuth allowed origins.",
-      "If broker execution fails, reconnect your Alpaca credentials and confirm they are valid paper-trading keys.",
-      "If a run is blocked, check the risk gate, the execution detail message, and the raw workflow state panel for the exact reason.",
     ],
   },
 ];

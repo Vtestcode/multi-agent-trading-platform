@@ -78,12 +78,18 @@ class RiskAgent:
         account = await self._fetch_account(state, broker_connection)
         open_positions = await self._fetch_open_positions(state, broker_connection)
         portfolio_history = await self._fetch_portfolio_history(state, broker_connection)
+        position_context = self._position_context(ticker=ticker, open_positions=open_positions)
+        shorting_enabled = bool(account.get("shorting_enabled", False))
 
         buying_power = float(account.get("buying_power") or 0.0)
         current_price = float(market_data.get("current_price") or 0.0)
         avg_daily_volume = float(market_data.get("avg_daily_volume") or 0.0)
-        max_notional_allowed = buying_power * self.max_position_pct
-        max_share_count = self._max_share_count(max_notional_allowed=max_notional_allowed, current_price=current_price)
+        is_close_long = signal == "SELL" and position_context["long_quantity"] > 0
+        is_cover_short = signal == "BUY" and position_context["short_quantity"] > 0
+        is_exit = is_close_long or is_cover_short
+        exit_quantity = position_context["long_quantity"] if is_close_long else position_context["short_quantity"] if is_cover_short else 0
+        max_notional_allowed = position_context["position_market_value"] if is_exit else buying_power * self.max_position_pct
+        max_share_count = exit_quantity if is_exit else self._max_share_count(max_notional_allowed=max_notional_allowed, current_price=current_price)
 
         prompt = self._build_prompt(
             ticker=ticker,
@@ -96,6 +102,8 @@ class RiskAgent:
             buying_power=buying_power,
             max_notional_allowed=max_notional_allowed,
             max_share_count=max_share_count,
+            position_context=position_context,
+            shorting_enabled=shorting_enabled,
         )
         result = await self.agent.run(prompt)
         llm_decision = result.output
@@ -109,6 +117,8 @@ class RiskAgent:
             avg_daily_volume=avg_daily_volume,
             max_notional_allowed=max_notional_allowed,
             max_share_count=max_share_count,
+            position_context=position_context,
+            shorting_enabled=shorting_enabled,
         )
 
         logger.info(
@@ -207,8 +217,26 @@ class RiskAgent:
                 "avg_daily_volume": avg_daily_volume,
                 "controls_triggered": ["missing_broker_connection"],
                 "llm_recommended_share_count": 0,
+                "trade_action": "NO_TRADE",
+                "execution_side": None,
+                "position_context": {
+                    "has_position": False,
+                    "long_quantity": 0,
+                    "short_quantity": 0,
+                    "position_side": "flat",
+                    "shorting_enabled": False,
+                },
             },
             "decision_model": self.model_name,
+            "trade_action": "NO_TRADE",
+            "execution_side": None,
+            "position_context": {
+                "has_position": False,
+                "long_quantity": 0,
+                "short_quantity": 0,
+                "position_side": "flat",
+                "shorting_enabled": False,
+            },
         }
 
     def _build_prompt(
@@ -223,6 +251,8 @@ class RiskAgent:
         buying_power: float,
         max_notional_allowed: float,
         max_share_count: int,
+        position_context: Dict[str, Any],
+        shorting_enabled: bool,
     ) -> str:
         return (
             "Evaluate whether this trade should pass the platform risk gate.\n\n"
@@ -238,13 +268,20 @@ class RiskAgent:
             f"{compact_json(research_context)}\n\n"
             "Account JSON:\n"
             f"{compact_json(account)}\n\n"
+            "Position context JSON:\n"
+            f"{compact_json(position_context)}\n\n"
+            f"Account shorting enabled: {shorting_enabled}\n\n"
             "Open positions JSON:\n"
             f"{compact_json({'positions': open_positions})}\n\n"
             "Portfolio history JSON:\n"
             f"{compact_json(portfolio_history)}\n\n"
             "Risk guidance:\n"
-            "- Approve only when the signal is actionable and the trade fits liquidity and buying-power policy.\n"
-            "- Reject non-BUY signals.\n"
+            "- BUY with no same-ticker position opens a long position.\n"
+            "- BUY with an existing short position should cover that short.\n"
+            "- SELL with an existing long position should close that long.\n"
+            "- SELL with no same-ticker position may open a short only if shorting is enabled.\n"
+            "- Reject attempts to add to an existing long or short position.\n"
+            "- HOLD signals should be rejected.\n"
             "- Never recommend more shares than the policy maximum.\n"
             "- Use current catalysts and risk flags from the research context when judging near-term execution risk.\n"
             "- Explain the most important controls that were triggered."
@@ -261,22 +298,61 @@ class RiskAgent:
         avg_daily_volume: float,
         max_notional_allowed: float,
         max_share_count: int,
+        position_context: Dict[str, Any],
+        shorting_enabled: bool,
     ) -> Dict[str, Any]:
         controls_triggered = list(llm_decision.controls_triggered)
 
         approved = bool(llm_decision.approved)
         share_count = max(0, min(int(llm_decision.share_count), max_share_count))
         reason = llm_decision.reason
+        trade_action = "NO_TRADE"
+        execution_side = None
+        opens_new_position = False
 
-        if signal != "BUY":
+        if signal == "HOLD":
             approved = False
             share_count = 0
-            controls_triggered.append("non_buy_signal")
+            controls_triggered.append("hold_signal")
+            reason = f"Rejected {ticker}: strategy signal is HOLD, so no trade should be placed."
+
+        if signal == "BUY" and position_context["long_quantity"] > 0:
+            approved = False
+            share_count = 0
+            controls_triggered.append("duplicate_long_position")
             reason = (
-                f"Rejected {ticker}: strategy signal is {signal}. The execution workflow only permits BUY orders."
+                f"Rejected {ticker}: an open long position already exists with quantity "
+                f"{position_context['long_quantity']}."
             )
 
-        if avg_daily_volume < self.min_avg_daily_volume:
+        if signal == "SELL" and position_context["short_quantity"] > 0:
+            approved = False
+            share_count = 0
+            controls_triggered.append("duplicate_short_position")
+            reason = (
+                f"Rejected {ticker}: an open short position already exists with quantity "
+                f"{position_context['short_quantity']}."
+            )
+
+        if signal == "SELL" and position_context["long_quantity"] > 0 and share_count < 1:
+            share_count = position_context["long_quantity"]
+
+        if signal == "BUY" and position_context["short_quantity"] > 0 and share_count < 1:
+            share_count = position_context["short_quantity"]
+
+        if signal == "SELL" and position_context["long_quantity"] < 1 and not shorting_enabled:
+            approved = False
+            share_count = 0
+            controls_triggered.append("shorting_disabled")
+            reason = f"Rejected {ticker}: short selling is not enabled on the connected account."
+
+        if signal == "BUY" and position_context["short_quantity"] == 0 and position_context["long_quantity"] == 0:
+            opens_new_position = True
+
+        if signal == "SELL" and position_context["long_quantity"] == 0 and position_context["short_quantity"] == 0:
+            opens_new_position = True
+
+        if signal in {"BUY", "SELL"} and opens_new_position and avg_daily_volume < self.min_avg_daily_volume:
             approved = False
             share_count = 0
             controls_triggered.append("liquidity_below_threshold")
@@ -285,11 +361,17 @@ class RiskAgent:
                 f"of {self.min_avg_daily_volume:,}."
             )
 
-        if buying_power <= 0:
+        if signal in {"BUY", "SELL"} and opens_new_position and buying_power <= 0:
             approved = False
             share_count = 0
             controls_triggered.append("buying_power_not_positive")
             reason = f"Rejected {ticker}: account buying power is not positive ({buying_power:.2f})."
+
+        if signal == "SELL" and position_context["long_quantity"] < 1 and position_context["short_quantity"] < 1 and shorting_enabled and share_count < 1:
+            approved = False
+            share_count = 0
+            controls_triggered.append("llm_zero_share_recommendation")
+            reason = f"Rejected {ticker}: the risk agent did not produce a viable short share count."
 
         if current_price <= 0:
             approved = False
@@ -312,6 +394,19 @@ class RiskAgent:
             controls_triggered.append("llm_zero_share_recommendation")
             reason = f"Rejected {ticker}: the risk agent did not produce a viable share count."
 
+        if approved and signal == "BUY" and position_context["short_quantity"] > 0:
+            trade_action = "COVER_SHORT"
+            execution_side = "buy"
+        elif approved and signal == "BUY":
+            trade_action = "OPEN_LONG"
+            execution_side = "buy"
+        elif approved and signal == "SELL" and position_context["long_quantity"] > 0:
+            trade_action = "CLOSE_LONG"
+            execution_side = "sell"
+        elif approved and signal == "SELL":
+            trade_action = "OPEN_SHORT"
+            execution_side = "sell"
+
         risk_details = {
             "approved": approved,
             "reason": reason,
@@ -324,6 +419,9 @@ class RiskAgent:
             "avg_daily_volume": avg_daily_volume,
             "controls_triggered": sorted(set(controls_triggered)),
             "llm_recommended_share_count": int(llm_decision.share_count),
+            "trade_action": trade_action,
+            "execution_side": execution_side,
+            "position_context": position_context,
         }
         return {
             "risk_approved": approved,
@@ -333,6 +431,9 @@ class RiskAgent:
             "risk_controls_triggered": risk_details["controls_triggered"],
             "risk_details": risk_details,
             "decision_model": self.model_name,
+            "trade_action": trade_action,
+            "execution_side": execution_side,
+            "position_context": position_context,
         }
 
     @staticmethod
@@ -340,3 +441,28 @@ class RiskAgent:
         if current_price <= 0:
             return 0
         return max(0, math.floor(max_notional_allowed / current_price))
+
+    @staticmethod
+    def _position_context(ticker: str, open_positions: list[Dict[str, Any]]) -> Dict[str, Any]:
+        normalized_ticker = str(ticker or "").strip().upper()
+        for position in open_positions:
+            symbol = str(position.get("symbol") or "").strip().upper()
+            if symbol != normalized_ticker:
+                continue
+            quantity = abs(int(float(position.get("qty") or 0)))
+            side = str(position.get("side") or "long").lower()
+            market_value = abs(float(position.get("market_value") or 0.0))
+            return {
+                "has_position": quantity > 0,
+                "position_side": side,
+                "long_quantity": quantity if side == "long" else 0,
+                "short_quantity": quantity if side == "short" else 0,
+                "position_market_value": market_value,
+            }
+        return {
+            "has_position": False,
+            "position_side": "flat",
+            "long_quantity": 0,
+            "short_quantity": 0,
+            "position_market_value": 0.0,
+        }

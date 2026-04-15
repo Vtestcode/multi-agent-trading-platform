@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import os
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from statistics import mean
 from typing import Any, Awaitable, Callable
 
@@ -170,7 +170,7 @@ class TradingToolRegistry:
     async def get_stock_bars(self, ticker: str, timeframe: str = "day", limit: int = 60) -> dict[str, Any]:
         self._require_polygon()
         multiplier, timespan = self._normalize_timeframe(timeframe)
-        end_date = datetime.now(tz=UTC).date()
+        end_date = datetime.now(tz=timezone.utc).date()
         start_date = end_date - timedelta(days=max(limit * 3, 20))
         url = (
             f"{POLYGON_BASE_URL}/v2/aggs/ticker/{ticker.strip().upper()}/range/{multiplier}/{timespan}/"
@@ -233,7 +233,7 @@ class TradingToolRegistry:
         return sorted(scored, key=lambda item: item["dollar_volume"], reverse=True)[:limit]
 
     async def check_market_clock(self) -> dict[str, Any]:
-        now = datetime.now(tz=UTC)
+        now = datetime.now(tz=timezone.utc)
         is_weekday = now.weekday() < 5
         is_market_hours = 14 <= now.hour < 21
         return {
